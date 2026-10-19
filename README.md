@@ -32,6 +32,8 @@ A plain FPS cap only controls the *average*. If frames are delivered at uneven m
 - **Per-game profiles.** Every game keeps its own FPS limit and settings in `glide.ini`.
 - **Automatic limit suggestion.** Hit *Calibrate*: Glide runs the game uncapped for 10 seconds, measures your real frame times and suggests a limit your system can hold steadily.
 - **Live performance graph.** FPS, average, deviation and max frame time, streamed straight from the game.
+- **Six languages.** English, Español, Português, 日本語, 中文 and 한국어. Defaults to your Windows language and can be changed in the app.
+- **Start with Windows and run in the background.** Optional autostart, and closing the window can keep Glide in the system tray so auto-inject keeps working.
 - **Installer included.** Per-user install, no admin rights needed, Start Menu and optional Desktop shortcuts, clean uninstall.
 
 ## Anti-cheat protection
@@ -40,7 +42,7 @@ Glide injects a DLL into the game, which anti-cheat systems can treat as cheatin
 
 - **A built-in blocklist** of 70+ known titles and launchers (Valorant, Overwatch, Fortnite, Apex Legends, CS2, Rainbow Six Siege, Escape from Tarkov, Genshin Impact, Zenless Zone Zero, Battlefield 6, Call of Duty, GTA V Online, Rust, and more).
 - **Module scanning.** Before injecting, Glide checks the target process for anti-cheat modules (Easy Anti-Cheat, BattlEye, Vanguard, GameGuard, XIGNCODE3, FACEIT, Ricochet, and others) and aborts if it finds one.
-- **Blocked games stay visible but dimmed**, tagged with a red *BLOQUEADO* label (the UI is in Spanish), and cannot be selected.
+- **Blocked games stay visible but dimmed**, tagged with a red *BLOCKED* label, and cannot be selected.
 - **Your own entries.** Add any exe to the `[block]` section of `glide.ini` (`Name.exe=1`).
 
 This applies to both manual and automatic injection.
@@ -92,7 +94,6 @@ This produces `glide.dll`, `glide-ui.exe` and `glide-setup.exe` (the installer e
 ## Notes
 
 - Windows 10 / 11, 64-bit games only.
-- The interface is currently in Spanish.
 - Exclusive fullscreen is not tested; borderless and windowed are recommended.
 
 ## License

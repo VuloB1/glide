@@ -5,6 +5,7 @@
 #include <algorithm>
 using std::min; using std::max;
 #include <windows.h>
+#include <shellapi.h>
 #include <gdiplus.h>
 #include <dwmapi.h>
 #include <uxtheme.h>
@@ -19,19 +20,24 @@ using std::min; using std::max;
 
 struct Stats { volatile LONG head; float ms[240]; volatile LONG calState, suggest, capable, calLeft; }; // must match glide.cpp
 
-enum { ID_PROC = 1, ID_FPS, ID_APPLY, ID_INJECT, ID_AUTO, ID_TIMER, ID_PICK, ID_CALIB, ID_USE, ID_PRE = 10 };
+#include "lang.h"
+enum { ID_PROC = 1, ID_FPS, ID_APPLY, ID_INJECT, ID_AUTO, ID_TIMER, ID_PICK, ID_CALIB, ID_USE, ID_PRE = 10, ID_LANG = 20, ID_STARTUP, ID_BG };
 static HWND hProc, hFps, g_wnd;
-static bool g_auto;
-static std::wstring g_status = L"Perfil por juego en glide.ini. Auto-inyectar solo actúa con esta ventana abierta.";
+static bool g_auto, g_startup, g_bg, g_quit; // g_bg: closing the window hides it to the tray instead of exiting
+static int g_lang;
+static const wchar_t* T(int id) { return kStr[id][g_lang]; }
+static std::wstring g_status; // empty = default footer hint
 static wchar_t g_dir[MAX_PATH], g_ini[MAX_PATH];
+static const UINT WM_TRAY = WM_APP + 1, WM_SHOWME = WM_APP + 2;
+static UINT g_tbCreated; static HICON g_icon;
 static HANDLE g_map;
 static Stats* g_st;
 static LONG g_lastHead; static DWORD g_lastChange;
 static std::set<DWORD> g_tried; // pids auto-inject already attempted (one shot each)
 static int g_sugg;                       // FPS suggested by the last calibration (0 = none)
 static bool g_calWait, g_calSeen; static DWORD g_calT0;
-static std::wstring g_cal1 = L"Calibración automática", g_cal2 = L"Mide 10 s sin límite (en partida)";
-static RECT kGraph = { 12, 100, 468, 250 };
+struct Msg { int id, arg; }; // calibration message: string id + optional %d argument, so it re-renders when the language changes
+static Msg g_c1 = { S_CAL_IDLE1, 0 }, g_c2 = { S_CAL_IDLE2, 0 };
 
 // Not exhaustive: games whose anti-cheat bans for injected DLLs or that are widely reported to.
 static const wchar_t* kBlock[] = {
@@ -130,12 +136,12 @@ static void Inject() {
     GetWindowTextW(hProc, name, 64);
     DWORD pid = 0;
     for (auto& p : Procs()) if (!_wcsicmp(p.second.c_str(), name)) { pid = p.first; break; }
-    if (!pid) { MessageBoxW(nullptr, L"Proceso no encontrado. Abre el juego primero y elígelo en la lista.", L"Glide", MB_ICONWARNING); return; }
-    if (ScanModules(pid).glide) { MessageBoxW(nullptr, L"Ya está inyectado. Usa Aplicar para cambiar el límite.", L"Glide", MB_ICONINFORMATION); return; }
+    if (!pid) { MessageBoxW(g_wnd, T(S_MB_NOTFOUND), L"Glide", MB_ICONWARNING); return; }
+    if (ScanModules(pid).glide) { MessageBoxW(g_wnd, T(S_MB_ALREADY), L"Glide", MB_ICONINFORMATION); return; }
     switch (InjectPid(pid, name)) {
-    case R_BLOCKED: MessageBoxW(nullptr, L"Este juego tiene anti-cheat o está en la lista negra: inyectar aquí puede darte un baneo. No se inyecta.", L"Glide", MB_ICONSTOP); break;
-    case R_NOOPEN:  MessageBoxW(nullptr, L"No se pudo abrir el proceso. Ejecuta Glide como administrador.", L"Glide", MB_ICONERROR); break;
-    case R_FAILED:  MessageBoxW(nullptr, L"Fallo al inyectar (¿juego de 32 bits?).", L"Glide", MB_ICONERROR); break;
+    case R_BLOCKED: MessageBoxW(g_wnd, T(S_MB_BLOCKED), L"Glide", MB_ICONSTOP); break;
+    case R_NOOPEN:  MessageBoxW(g_wnd, T(S_MB_NOOPEN), L"Glide", MB_ICONERROR); break;
+    case R_FAILED:  MessageBoxW(g_wnd, T(S_MB_FAILED), L"Glide", MB_ICONERROR); break;
     }
 }
 
@@ -150,9 +156,9 @@ static void AutoScan() {
             if (_wcsicmp(p.second.c_str(), n) || !wins.count(p.first) || !g_tried.insert(p.first).second) continue;
             if (ScanModules(p.first).glide) continue;
             switch (InjectPid(p.first, n)) {
-            case R_OK:      swprintf_s(msg, L"Auto: %s inyectado", n); break;
-            case R_BLOCKED: swprintf_s(msg, L"Auto: %s bloqueado (anti-cheat / lista negra)", n); break;
-            default:        swprintf_s(msg, L"Auto: fallo al inyectar %s", n);
+            case R_OK:      swprintf_s(msg, T(S_AUTO_OK), n); break;
+            case R_BLOCKED: swprintf_s(msg, T(S_AUTO_BLK), n); break;
+            default:        swprintf_s(msg, T(S_AUTO_FAIL), n);
             }
             g_status = msg;
         }
@@ -192,7 +198,9 @@ static void Txt(Graphics& g, const wchar_t* s, Font* f, Color c, float x, float 
 static int CurFps() { wchar_t t[16]; GetWindowTextW(hFps, t, 16); return _wtoi(t); }
 
 // Buttons are painted and hit-tested by the main window (native child buttons leave a stray 1px edge).
-struct Btn { int id; float x, y, w, h; const wchar_t* text; };
+struct Btn { int id; float x, y, w, h; int str; const wchar_t* lit; }; // label = lit if set, else the translated string `str`
+static const wchar_t* Label(const Btn& b) { return b.lit ? b.lit : T(b.str); }
+static bool On(int id) { return id == ID_AUTO ? g_auto : id == ID_STARTUP ? g_startup : g_bg; }
 static std::vector<Btn> g_btns;
 static int g_hot, g_down;
 
@@ -209,24 +217,25 @@ static void DrawBtn(Graphics& g, const Btn& b) {
     GraphicsState st = g.Save(); g.TranslateTransform(b.x, b.y);
     float w = b.w, h = b.h; int id = b.id;
     int shade = id == g_down && id == g_hot ? -18 : id == g_hot ? 14 : 0;
-    if (id == ID_PICK) { // whole input box is the click target; chevron on the right
+    if (id == ID_PICK || id == ID_LANG) { // whole input box is the click target; chevron on the right
         if (id == g_hot) { GraphicsPath gp; RoundPath(gp, 0.5f, 0.5f, w - 1, h - 1, 8); Pen hp(cAccent, 1.2f); g.DrawPath(&hp, &gp); }
         Pen p(shade ? cText : cMuted, 2); p.SetStartCap(LineCapRound); p.SetEndCap(LineCapRound); p.SetLineJoin(LineJoinRound);
         PointF c[3] = { PointF(w - 25, h / 2 - 2), PointF(w - 20, h / 2 + 3), PointF(w - 15, h / 2 - 2) }; g.DrawLines(&p, c, 3);
-    } else if (id == ID_AUTO) { // toggle switch + label
-        Round(g, g_auto ? Mix(cAccent, shade) : Mix(Color(66, 71, 84), shade), 0, (h - 20) / 2, 38, 20, 10);
-        SolidBrush k(Color(255, 255, 255)); g.FillEllipse(&k, g_auto ? 20.f : 2.f, (h - 16) / 2, 16.f, 16.f);
-        Txt(g, b.text, fBtn, cText, 48, 0, w - 48, h);
-    } else if (id >= ID_PRE) { // fps preset pill
+    } else if (id == ID_AUTO || id == ID_STARTUP || id == ID_BG) { // toggle switch + label
+        bool on = On(id);
+        Round(g, on ? Mix(cAccent, shade) : Mix(Color(66, 71, 84), shade), 0, (h - 20) / 2, 38, 20, 10);
+        SolidBrush k(Color(255, 255, 255)); g.FillEllipse(&k, on ? 20.f : 2.f, (h - 16) / 2, 16.f, 16.f);
+        Txt(g, Label(b), fBtn, cText, 48, 0, w - 48, h);
+    } else if (id >= ID_PRE && id < ID_PRE + 6) { // fps preset pill
         bool sel = kPre[id - ID_PRE] == CurFps();
         Round(g, sel ? Mix(cAccent, shade) : Mix(cInput, shade), 0, 0, w, h, h / 2);
-        Txt(g, b.text, fBtn, sel ? Color(255, 255, 255) : cText, 0, 0, w, h, StringAlignmentCenter);
+        Txt(g, Label(b), fBtn, sel ? Color(255, 255, 255) : cText, 0, 0, w, h, StringAlignmentCenter);
     } else if (id == ID_INJECT || id == ID_USE) {
         Round(g, Mix(cAccent, shade), 0, 0, w, h, 8);
-        Txt(g, b.text, fBtn, Color(255, 255, 255), 0, 0, w, h, StringAlignmentCenter);
+        Txt(g, Label(b), fBtn, Color(255, 255, 255), 0, 0, w, h, StringAlignmentCenter);
     } else { // secondary
         Round(g, Mix(cInput, shade), 0, 0, w, h, 8, &cBorder);
-        Txt(g, b.text, fBtn, cText, 0, 0, w, h, StringAlignmentCenter);
+        Txt(g, Label(b), fBtn, cText, 0, 0, w, h, StringAlignmentCenter);
     }
     g.Restore(st);
 }
@@ -244,36 +253,38 @@ static bool IsNoise(DWORD pid, const wchar_t* name) {
 }
 
 // Process picker: custom popup (layered, anti-aliased) listing graphics apps; blocked games are shown dimmed and cannot be picked.
-struct PItem { std::wstring name, title; bool blocked; };
-static struct { HWND h; std::vector<PItem> it; int hover, top, pick; bool done; } g_pk;
-static const int PK_M = 14, PK_W = 330, PK_ROW = 46, PK_PAD = 6, PK_MAX = 6;
+struct PItem { std::wstring name, title; bool blocked, sel; };
+static struct { HWND h; std::vector<PItem> it; int hover, top, pick; bool done; int w, row; bool proc; } g_pk; // proc: process list (vs. language list)
+static const int PK_M = 14, PK_PAD = 6, PK_MAX = 6;
 
 static int PkRows() { int n = (int)g_pk.it.size(); return n < 1 ? 1 : n > PK_MAX ? PK_MAX : n; }
 
 static void PkPaint() {
-    int rows = PkRows(); float H = (float)(PK_PAD * 2 + rows * PK_ROW), W = (float)PK_W, M = (float)PK_M;
-    int pw = S(PK_W + 2 * PK_M), ph = S((int)H + 2 * PK_M);
+    int rows = PkRows(); float H = (float)(PK_PAD * 2 + rows * g_pk.row), W = (float)g_pk.w, M = (float)PK_M;
+    int pw = S(g_pk.w + 2 * PK_M), ph = S((int)H + 2 * PK_M);
     Bitmap bmp(pw, ph, PixelFormat32bppPARGB);
     {
         Graphics g(&bmp); g.SetSmoothingMode(SmoothingModeAntiAlias); g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit); g.ScaleTransform(g_k, g_k);
         for (int i = 0; i < 7; i++) { float e = (float)(7 - i); Round(g, Color(9, 0, 0, 0), M - e, M - e + 4, W + 2 * e, H + 2 * e, 12 + e); } // soft shadow
         Round(g, Color(31, 34, 42), M, M, W, H, 12, &cBorder);
         if (g_pk.it.empty()) {
-            Txt(g, L"No hay juegos abiertos", fBtn, cText, M + 16, M + PK_PAD + 5, W - 32);
-            Txt(g, L"Abre el juego y vuelve a desplegar la lista", fSmall, cMuted, M + 16, M + PK_PAD + 24, W - 32);
+            Txt(g, T(S_NOGAMES), fBtn, cText, M + 16, M + PK_PAD + 5, W - 32);
+            Txt(g, T(S_NOGAMES2), fSmall, cMuted, M + 16, M + PK_PAD + 24, W - 32);
         }
-        wchar_t cur[64]; GetWindowTextW(hProc, cur, 64);
         for (int r = 0; r < rows && g_pk.top + r < (int)g_pk.it.size(); r++) {
             int i = g_pk.top + r; const PItem& it = g_pk.it[i];
-            float x = M + PK_PAD, y = M + PK_PAD + r * PK_ROW, w = W - 2 * PK_PAD;
-            if (i == g_pk.hover && !it.blocked) Round(g, cInput, x, y, w, (float)PK_ROW - 2, 8);
-            Txt(g, it.name.c_str(), fBtn, it.blocked ? cMuted : cText, x + 12, y + 6, w - (it.blocked ? 110.f : 44.f));
-            Txt(g, it.title.c_str(), fSmall, Color(110, 116, 132), x + 12, y + 24, w - 44);
+            float x = M + PK_PAD, y = M + PK_PAD + r * g_pk.row, w = W - 2 * PK_PAD, rh = (float)g_pk.row - 2;
+            if (i == g_pk.hover && !it.blocked) Round(g, cInput, x, y, w, rh, 8);
+            if (it.title.empty()) Txt(g, it.name.c_str(), fBtn, cText, x + 12, y, w - 44, rh);
+            else {
+                Txt(g, it.name.c_str(), fBtn, it.blocked ? cMuted : cText, x + 12, y + 6, w - (it.blocked ? 110.f : 44.f));
+                Txt(g, it.title.c_str(), fSmall, Color(110, 116, 132), x + 12, y + 24, w - 44);
+            }
             if (it.blocked) {
                 Round(g, Color(50, 240, 90, 80), x + w - 96, y + 8, 84, 20, 10);
-                Txt(g, L"BLOQUEADO", fLabel, cBad, x + w - 96, y + 8, 84, 20, StringAlignmentCenter);
-            } else if (!_wcsicmp(it.name.c_str(), cur)) {
-                SolidBrush d(cAccent); g.FillEllipse(&d, x + w - 24, y + 14, 8.f, 8.f);
+                Txt(g, T(S_BLOCKED), fLabel, cBad, x + w - 96, y + 8, 84, 20, StringAlignmentCenter);
+            } else if (it.sel) {
+                SolidBrush d(cAccent); g.FillEllipse(&d, x + w - 24, y + rh / 2 - 4, 8.f, 8.f);
             }
         }
         if ((int)g_pk.it.size() > PK_MAX) { // scrollbar thumb
@@ -290,8 +301,8 @@ static void PkPaint() {
 
 static int PkHit(LPARAM lp) {
     float x = (short)LOWORD(lp) / g_k - PK_M, y = (short)HIWORD(lp) / g_k - PK_M;
-    if (x < PK_PAD || x > PK_W - PK_PAD || y < PK_PAD) return -1;
-    int r = (int)(y - PK_PAD) / PK_ROW, i = g_pk.top + r;
+    if (x < PK_PAD || x > g_pk.w - PK_PAD || y < PK_PAD) return -1;
+    int r = (int)(y - PK_PAD) / g_pk.row, i = g_pk.top + r;
     return r < PkRows() && i < (int)g_pk.it.size() ? i : -1;
 }
 
@@ -334,68 +345,113 @@ static LRESULT CALLBACK PkProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(h, m, wp, lp);
 }
 
-static void PickProc() {
-    g_pk.it.clear(); std::set<std::wstring> seen;
-    auto wins = WindowPids();
-    for (auto& p : Procs()) {
-        if (p.first == GetCurrentProcessId() || !wins.count(p.first) || seen.count(p.second) || IsNoise(p.first, p.second.c_str())) continue;
-        Mods md = ScanModules(p.first);
-        if (!md.dxgi) continue;
-        seen.insert(p.second); g_pk.it.push_back({ p.second, wins[p.first], Blocked(p.second.c_str()) || md.ac });
-    }
-    std::sort(g_pk.it.begin(), g_pk.it.end(), [](const PItem& a, const PItem& b) { return a.blocked != b.blocked ? !a.blocked : _wcsicmp(a.name.c_str(), b.name.c_str()) < 0; });
+// Shows g_pk.it under (or above) button `btn`; returns the picked index or -1.
+static int ShowPick(int btn, int w, int row, bool proc, bool up) {
+    g_pk.w = w; g_pk.row = row; g_pk.proc = proc;
     g_pk.hover = -1; g_pk.top = 0; g_pk.pick = -1; g_pk.done = false;
-
     static bool reg;
     if (!reg) { WNDCLASSW wc = { 0, PkProc, 0, 0, GetModuleHandleW(nullptr), nullptr, LoadCursorW(nullptr, IDC_ARROW), nullptr, 0, L"GlidePick" }; RegisterClassW(&wc); reg = true; }
+    int m = S(PK_M), pw = S(w + 2 * PK_M), inner = S(PK_PAD * 2 + PkRows() * row), ph = inner + 2 * m;
     POINT pt = { 0, 0 };
-    for (auto& b : g_btns) if (b.id == ID_PICK) { RECT r = BtnRect(b); pt = { S(40), r.bottom + S(4) }; }
+    for (auto& b : g_btns) if (b.id == btn) { RECT r = BtnRect(b); pt = { r.left, up ? r.top - S(4) - inner : r.bottom + S(4) }; }
     ClientToScreen(g_wnd, &pt);
-    int m = S(PK_M), pw = S(PK_W + 2 * PK_M), ph = S(PK_PAD * 2 + PkRows() * PK_ROW + 2 * PK_M);
     g_pk.h = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST, L"GlidePick", L"", WS_POPUP, pt.x - m, pt.y - m, pw, ph, g_wnd, nullptr, GetModuleHandleW(nullptr), nullptr);
     PkPaint(); ShowWindow(g_pk.h, SW_SHOW); SetForegroundWindow(g_pk.h);
     MSG msg;
     while (!g_pk.done && GetMessageW(&msg, 0, 0, 0)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
     DestroyWindow(g_pk.h);
-    if (g_pk.pick >= 0) { SetWindowTextW(hProc, g_pk.it[g_pk.pick].name.c_str()); LoadProfile(); }
+    return g_pk.pick;
+}
+
+static void PickProc() {
+    std::vector<PItem> v; std::set<std::wstring> seen;
+    auto wins = WindowPids();
+    wchar_t cur[64]; GetWindowTextW(hProc, cur, 64);
+    for (auto& p : Procs()) {
+        if (p.first == GetCurrentProcessId() || !wins.count(p.first) || seen.count(p.second) || IsNoise(p.first, p.second.c_str())) continue;
+        Mods md = ScanModules(p.first);
+        if (!md.dxgi) continue;
+        seen.insert(p.second); v.push_back({ p.second, wins[p.first], Blocked(p.second.c_str()) || md.ac, !_wcsicmp(p.second.c_str(), cur) });
+    }
+    std::sort(v.begin(), v.end(), [](const PItem& a, const PItem& b) { return a.blocked != b.blocked ? !a.blocked : _wcsicmp(a.name.c_str(), b.name.c_str()) < 0; });
+    g_pk.it = v;
+    int i = ShowPick(ID_PICK, 330, 46, true, false);
+    if (i >= 0) { SetWindowTextW(hProc, v[i].name.c_str()); LoadProfile(); }
 }
 
 // Calibration: the DLL runs the game uncapped for ~10 s (see glide.cpp) and publishes a suggestion in the shared stats.
 static void CalibTick() {
     if (!g_calWait || !g_st) return;
-    LONG s = g_st->calState; wchar_t b[96];
+    LONG s = g_st->calState;
     if (s == 1) {
         g_calSeen = true;
-        swprintf_s(b, L"Midiendo... %d s", (int)g_st->calLeft); g_cal1 = b;
-        g_cal2 = L"Juega normal; el límite vuelve solo";
+        g_c1 = { S_CAL_MEAS, (int)g_st->calLeft }; g_c2 = { S_CAL_PLAY, 0 };
     } else if (g_calSeen && (s == 2 || s == 3)) {
         g_calWait = false;
-        if (s == 3) { g_cal1 = L"No se pudo medir"; g_cal2 = L"Pocos fotogramas: prueba otra vez en juego"; return; }
+        if (s == 3) { g_c1 = { S_CAL_FAIL, 0 }; g_c2 = { S_CAL_FEW, 0 }; return; }
         DEVMODEW dm = {}; dm.dmSize = sizeof(dm); EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm);
         int hz = dm.dmDisplayFrequency, sug = g_st->suggest; bool mon = hz > 30 && sug > hz - 3;
         g_sugg = mon ? hz - 3 : sug;
-        swprintf_s(b, L"Sugerido: %d FPS", g_sugg); g_cal1 = b;
-        if (mon) swprintf_s(b, L"Tope del monitor (%d Hz)", hz);
-        else swprintf_s(b, L"El juego aguanta ~%d sin fluctuar", (int)g_st->capable);
-        g_cal2 = b;
+        g_c1 = { S_CAL_SUG, g_sugg };
+        g_c2 = mon ? Msg{ S_CAL_MON, hz } : Msg{ S_CAL_HOLD, (int)g_st->capable };
     } else if (!g_calSeen && GetTickCount() - g_calT0 > 5000) {
-        g_calWait = false; g_cal1 = L"No se pudo iniciar"; g_cal2 = L"¿Está el juego inyectado y en pantalla?";
+        g_calWait = false; g_c1 = { S_CAL_NOSTART, 0 }; g_c2 = { S_CAL_ISINJ, 0 };
     }
+}
+
+// ---------- settings: language, start with Windows, tray ----------
+static const wchar_t* kRun = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+static bool StartupGet() { return RegGetValueW(HKEY_CURRENT_USER, kRun, L"Glide", RRF_RT_REG_SZ, nullptr, nullptr, nullptr) == ERROR_SUCCESS; }
+static void StartupSet(bool on) {
+    if (!on) { RegDeleteKeyValueW(HKEY_CURRENT_USER, kRun, L"Glide"); return; }
+    wchar_t exe[MAX_PATH], v[MAX_PATH + 16]; GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    swprintf_s(v, L"\"%s\" /tray", exe);
+    RegSetKeyValueW(HKEY_CURRENT_USER, kRun, L"Glide", REG_SZ, v, (DWORD)((wcslen(v) + 1) * sizeof(wchar_t)));
+}
+
+static void Tray(DWORD op) {
+    NOTIFYICONDATAW n = { sizeof(n) }; n.hWnd = g_wnd; n.uID = 1;
+    n.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP; n.uCallbackMessage = WM_TRAY; n.hIcon = g_icon; wcscpy_s(n.szTip, L"Glide");
+    Shell_NotifyIconW(op, &n);
+}
+static void ShowMain() { ShowWindow(g_wnd, SW_SHOW); ShowWindow(g_wnd, SW_RESTORE); SetForegroundWindow(g_wnd); }
+
+static void MakeFonts() { // CJK needs its own family; title/numbers are Latin-only so they stay Segoe UI
+    const wchar_t* fam = g_lang == 3 ? L"Yu Gothic UI" : g_lang == 4 ? L"Microsoft YaHei UI" : g_lang == 5 ? L"Malgun Gothic" : L"Segoe UI";
+    delete fSub; delete fLabel; delete fSmall; delete fBtn;
+    fSub = new Font(fam, 13, FontStyleRegular, UnitPixel); fLabel = new Font(fam, 11, FontStyleBold, UnitPixel);
+    fSmall = new Font(fam, 12, FontStyleRegular, UnitPixel); fBtn = new Font(fam, 13, FontStyleBold, UnitPixel);
+}
+static void SetLang(int l) {
+    g_lang = l; MakeFonts();
+    wchar_t t[8]; swprintf_s(t, L"%d", l); WritePrivateProfileStringW(L"glide", L"lang", t, g_ini);
+    InvalidateRect(g_wnd, nullptr, FALSE);
 }
 
 static void Command(int id) {
     if (id == ID_PICK) PickProc();
+    else if (id == ID_LANG) {
+        g_pk.it.clear();
+        for (int i = 0; i < NLANG; i++) g_pk.it.push_back({ kLangName[i], L"", false, i == g_lang });
+        int i = ShowPick(ID_LANG, 200, 34, false, true);
+        if (i >= 0 && i != g_lang) SetLang(i);
+    }
+    else if (id == ID_STARTUP) { g_startup = !g_startup; StartupSet(g_startup); InvBtn(id); }
+    else if (id == ID_BG) {
+        g_bg = !g_bg; WritePrivateProfileStringW(L"glide", L"background", g_bg ? L"1" : L"0", g_ini);
+        Tray(g_bg ? NIM_ADD : NIM_DELETE); InvBtn(id);
+    }
     else if (id == ID_CALIB && !g_calWait) {
-        if (!g_st || GetTickCount() - g_lastChange > 1500) { g_cal1 = L"Nada que medir"; g_cal2 = L"Inyecta y abre el juego primero"; }
+        if (!g_st || GetTickCount() - g_lastChange > 1500) { g_c1 = { S_CAL_NOTHING, 0 }; g_c2 = { S_CAL_INJFIRST, 0 }; }
         else {
             wchar_t n[64]; GetWindowTextW(hProc, n, 64); WritePrivateProfileStringW(n, L"calibrate", L"1", g_ini);
-            g_calWait = true; g_calSeen = false; g_calT0 = GetTickCount(); g_sugg = 0; g_cal1 = L"Iniciando..."; g_cal2 = L"El límite se quita 10 s para medir";
+            g_calWait = true; g_calSeen = false; g_calT0 = GetTickCount(); g_sugg = 0; g_c1 = { S_CAL_STARTING, 0 }; g_c2 = { S_CAL_REMOVED, 0 };
         }
         InvalidateRect(g_wnd, nullptr, FALSE);
     }
     else if (id == ID_USE && g_sugg) {
         wchar_t t[16]; swprintf_s(t, L"%d", g_sugg); SetWindowTextW(hFps, t); SaveProfile();
-        g_cal1 = L"Límite aplicado"; g_cal2 = L"Guardado en el perfil del juego"; g_sugg = 0; InvalidateRect(g_wnd, nullptr, FALSE);
+        g_c1 = { S_CAL_APPLIED, 0 }; g_c2 = { S_CAL_SAVED, 0 }; g_sugg = 0; InvalidateRect(g_wnd, nullptr, FALSE);
     }
     else if (id == ID_APPLY) SaveProfile();
     else if (id == ID_INJECT) { SaveProfile(); Inject(); }
@@ -435,25 +491,30 @@ static void Paint(HDC dc, const RECT& clip) {
         // header
         DrawLogo(g, 24, 14, 48);
         Txt(g, L"Glide", fTitle, cText, 82, 12);
-        Txt(g, L"Frame pacing para DX11 / DX12", fSub, cMuted, 84, 48);
+        Txt(g, T(S_SUB), fSub, cMuted, 84, 48);
         Round(g, cCard, (float)kPill.left, (float)kPill.top, 176, 32, 16, &cBorder);
         { SolidBrush dot(live ? cGood : cMuted); g.FillEllipse(&dot, kPill.left + 16.f, kPill.top + 12.f, 8.f, 8.f); }
-        Txt(g, live ? L"Limitando" : L"Esperando juego", fSub, live ? cGood : cMuted, kPill.left + 32.f, (float)kPill.top, 140, 32);
+        Txt(g, live ? T(S_LIMITING) : T(S_WAITING), fSub, live ? cGood : cMuted, kPill.left + 32.f, (float)kPill.top, 140, 32);
 
         // cards
-        Card(g, 24, 84, 512, 128, L"JUEGO");
-        Card(g, 24, 228, 512, 140, L"LÍMITE DE FPS");
-        Txt(g, g_cal1.c_str(), fBtn, cText, 204, 318, 216, 16);
-        Txt(g, g_cal2.c_str(), fSmall, cMuted, 204, 336, 216, 16);
+        Card(g, 24, 84, 512, 128, T(S_GAME));
+        Card(g, 24, 228, 512, 140, T(S_FPSLIMIT));
+        wchar_t c1[96], c2[96]; swprintf_s(c1, T(g_c1.id), g_c1.arg); swprintf_s(c2, T(g_c2.id), g_c2.arg);
+        Txt(g, c1, fBtn, cText, 204, 318, 216, 16);
+        Txt(g, c2, fSmall, cMuted, 204, 336, 216, 16);
         Round(g, cInput, 40, 268, 70, 38, 8, &cBorder);
         Round(g, cInput, 40, 122, 330, 32, 8, &cBorder);
-        { wchar_t pn[64]; GetWindowTextW(hProc, pn, 64); Txt(g, *pn ? pn : L"Elige un juego...", fSub, *pn ? cText : cMuted, 52, 122, 270, 32); }
-        Card(g, 24, (float)kStatsCard.top, 512, 188, L"RENDIMIENTO");
+        { wchar_t pn[64]; GetWindowTextW(hProc, pn, 64); Txt(g, *pn ? pn : T(S_CHOOSE), fSub, *pn ? cText : cMuted, 52, 122, 270, 32); }
+        Card(g, 24, (float)kStatsCard.top, 512, 188, T(S_PERF));
+        Card(g, 24, 584, 512, 112, T(S_SETTINGS));
+        Txt(g, T(S_LANGUAGE), fSub, cMuted, 40, 620, 120, 32);
+        Round(g, cInput, 170, 620, 200, 32, 8, &cBorder);
+        Txt(g, kLangName[g_lang], fSub, cText, 182, 620, 150, 32);
 
         for (auto& b : g_btns) if (b.id != ID_USE || g_sugg) DrawBtn(g, b);
 
         // metrics
-        wchar_t s[32]; const wchar_t* lab[4] = { L"FPS", L"MEDIA (ms)", L"DESV. (ms)", L"MÁX. (ms)" };
+        wchar_t s[32]; const wchar_t* lab[4] = { L"FPS", T(S_MAVG), T(S_MDEV), T(S_MMAX) };
         double val[4] = { live ? 1000 / mean : 0, mean, sqrt(n ? var / n : 0), mx };
         for (int i = 0; i < 4; i++) {
             float x = 40.f + i * 126;
@@ -482,11 +543,11 @@ static void Paint(HDC dc, const RECT& clip) {
             SolidBrush bad(cBad);
             for (int i = 0; i < n; i++) if (fabs(v[i] - mean) > mean * 0.15) g.FillEllipse(&bad, pts[i].X - 2.5f, pts[i].Y - 2.5f, 5.f, 5.f);
         } else {
-            Txt(g, L"Abre el juego e inyecta para ver los frametimes en vivo", fSub, cMuted, gx, gy, gw, gh, StringAlignmentCenter);
+            Txt(g, T(S_GRAPH), fSub, cMuted, gx, gy, gw, gh, StringAlignmentCenter);
         }
 
         // status
-        Txt(g, g_status.c_str(), fSmall, cMuted, 26, 582, 508);
+        Txt(g, g_status.empty() ? T(S_FOOT) : g_status.c_str(), fSmall, cMuted, 26, 706, 508);
     }
     BitBlt(dc, clip.left, clip.top, clip.right - clip.left, clip.bottom - clip.top, m, clip.left, clip.top, SRCCOPY);
     DeleteObject(bm); DeleteDC(m);
@@ -530,29 +591,59 @@ static LRESULT CALLBACK Proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         PAINTSTRUCT ps; HDC dc = BeginPaint(w, &ps); Paint(dc, ps.rcPaint); EndPaint(w, &ps);
         return 0;
     }
-    case WM_DESTROY: PostQuitMessage(0); return 0;
+    case WM_CLOSE:
+        if (g_bg && !g_quit) { ShowWindow(w, SW_HIDE); return 0; }
+        break;
+    case WM_TRAY:
+        if (lp == WM_LBUTTONUP || lp == WM_LBUTTONDBLCLK) ShowMain();
+        else if (lp == WM_RBUTTONUP) {
+            HMENU mn = CreatePopupMenu(); POINT pt; GetCursorPos(&pt);
+            AppendMenuW(mn, MF_STRING, 1, T(S_TRAY_OPEN)); AppendMenuW(mn, MF_STRING, 2, T(S_TRAY_EXIT));
+            SetForegroundWindow(w);
+            int c = TrackPopupMenu(mn, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, w, nullptr);
+            DestroyMenu(mn);
+            if (c == 1) ShowMain(); else if (c == 2) { g_quit = true; DestroyWindow(w); }
+        }
+        return 0;
+    case WM_SHOWME: ShowMain(); return 0;
+    case WM_DESTROY: Tray(NIM_DELETE); PostQuitMessage(0); return 0;
+    default:
+        if (msg == g_tbCreated && g_bg) Tray(NIM_ADD); // explorer restarted
     }
     return DefWindowProcW(w, msg, wp, lp);
 }
 
-int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
+int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
+    HANDLE once = CreateMutexW(nullptr, FALSE, L"Local\\GlideUI");
+    if (GetLastError() == ERROR_ALREADY_EXISTS) { // already running (maybe hidden in the tray): bring it up
+        if (HWND o = FindWindowW(L"GlideUI", nullptr)) PostMessageW(o, WM_SHOWME, 0, 0);
+        return 0;
+    }
     SetProcessDPIAware();
     HDC sdc = GetDC(nullptr); g_k = GetDeviceCaps(sdc, LOGPIXELSX) / 96.f; ReleaseDC(nullptr, sdc);
     ULONG_PTR gdip; GdiplusStartupInput gin; GdiplusStartup(&gdip, &gin, nullptr);
-    fTitle = new Font(L"Segoe UI", 26, FontStyleBold, UnitPixel); fSub = new Font(L"Segoe UI", 13, FontStyleRegular, UnitPixel);
-    fLabel = new Font(L"Segoe UI", 11, FontStyleBold, UnitPixel); fBig = new Font(L"Segoe UI", 24, FontStyleBold, UnitPixel);
-    fSmall = new Font(L"Segoe UI", 12, FontStyleRegular, UnitPixel); fBtn = new Font(L"Segoe UI", 13, FontStyleBold, UnitPixel);
-    g_brIn = CreateSolidBrush(RGB(38, 42, 51));
-    g_brCard = CreateSolidBrush(RGB(27, 30, 37));
 
     GetModuleFileNameW(nullptr, g_dir, MAX_PATH);
     *wcsrchr(g_dir, L'\\') = 0;
     swprintf_s(g_ini, L"%s\\glide.ini", g_dir);
 
+    WORD plang = PRIMARYLANGID(GetUserDefaultUILanguage()); // first run: follow Windows' language, English if unsupported
+    int def = plang == LANG_SPANISH ? 1 : plang == LANG_PORTUGUESE ? 2 : plang == LANG_JAPANESE ? 3 : plang == LANG_CHINESE ? 4 : plang == LANG_KOREAN ? 5 : 0;
+    g_lang = GetPrivateProfileIntW(L"glide", L"lang", def, g_ini);
+    if (g_lang < 0 || g_lang >= NLANG) g_lang = def;
+    g_bg = GetPrivateProfileIntW(L"glide", L"background", 0, g_ini) != 0;
+    g_startup = StartupGet();
+    fTitle = new Font(L"Segoe UI", 26, FontStyleBold, UnitPixel); fBig = new Font(L"Segoe UI", 24, FontStyleBold, UnitPixel);
+    MakeFonts();
+    g_brIn = CreateSolidBrush(RGB(38, 42, 51));
+    g_brCard = CreateSolidBrush(RGB(27, 30, 37));
+    g_icon = (HICON)LoadImageW(hi, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0);
+    g_tbCreated = RegisterWindowMessageW(L"TaskbarCreated");
+
     WNDCLASSW wc = { 0, Proc, 0, 0, hi, LoadIconW(hi, MAKEINTRESOURCEW(1)), LoadCursorW(nullptr, IDC_ARROW), nullptr, 0, L"GlideUI" };
     RegisterClassW(&wc);
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
-    RECT r = { 0, 0, S(560), S(608) }; AdjustWindowRect(&r, style, FALSE);
+    RECT r = { 0, 0, S(560), S(728) }; AdjustWindowRect(&r, style, FALSE);
     g_wnd = CreateWindowW(L"GlideUI", L"Glide", style, CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, 0, 0, hi, 0);
     HWND w = g_wnd;
     BOOL dark = TRUE; DwmSetWindowAttribute(w, 20, &dark, sizeof(dark));          // dark title bar
@@ -568,18 +659,21 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
     hProc = mk(L"EDIT", t, ES_AUTOHSCROLL, 52, 130, 276, 18, ID_PROC); // hidden: only stores the chosen process name
     ShowWindow(hProc, SW_HIDE);
     SendMessageW(hProc, EM_LIMITTEXT, 63, 0);
-    g_btns = { { ID_PICK, 40, 122, 330, 32, L"" }, { ID_INJECT, 384, 122, 136, 32, L"Inyectar" }, { ID_AUTO, 40, 170, 330, 26, L"Auto-inyectar al abrir el juego" }, { ID_APPLY, 120, 268, 80, 38, L"Aplicar" }, { ID_CALIB, 40, 320, 150, 36, L"Calibrar límite" }, { ID_USE, 428, 320, 92, 36, L"Usar" } };
+    g_btns = { { ID_PICK, 40, 122, 330, 32, 0, L"" }, { ID_INJECT, 384, 122, 136, 32, S_INJECT, nullptr }, { ID_AUTO, 40, 170, 330, 26, S_AUTOINJ, nullptr },
+               { ID_APPLY, 120, 268, 80, 38, S_APPLY, nullptr }, { ID_CALIB, 40, 320, 150, 36, S_CALIB, nullptr }, { ID_USE, 428, 320, 92, 36, S_USE, nullptr },
+               { ID_LANG, 170, 620, 200, 32, 0, L"" }, { ID_STARTUP, 40, 662, 236, 26, S_STARTUP, nullptr }, { ID_BG, 284, 662, 236, 26, S_BG, nullptr } };
 
     hFps = mk(L"EDIT", L"", ES_NUMBER | ES_CENTER | ES_AUTOHSCROLL, 50, 277, 50, 20, ID_FPS);
     const wchar_t* pl[6] = { L"60", L"90", L"120", L"144", L"180", L"∞" };
-    for (int i = 0; i < 6; i++) g_btns.push_back({ ID_PRE + i, 212.f + i * 50, 268, 46, 38, pl[i] });
+    for (int i = 0; i < 6; i++) g_btns.push_back({ ID_PRE + i, 212.f + i * 50, 268, 46, 38, 0, pl[i] });
     LoadProfile();
     SetTimer(w, ID_TIMER, 50, nullptr);
-    ShowWindow(w, SW_SHOW);
+    if (g_bg) Tray(NIM_ADD);
+    if (!(g_bg && wcsstr(cmd, L"/tray"))) ShowWindow(w, SW_SHOW); // autostart with the background option: stay in the tray
 
     MSG m;
     while (GetMessageW(&m, 0, 0, 0)) { TranslateMessage(&m); DispatchMessageW(&m); }
-    GdiplusShutdown(gdip);
+    GdiplusShutdown(gdip); CloseHandle(once);
     return 0;
 }
 // shortcut: 64-bit games only; anti-cheat detection is a name list + module check done once at inject time (an anti-cheat loaded later is missed), upgrade if needed.

@@ -15,6 +15,30 @@ using std::min; using std::max;
 #include <vector>
 using namespace Gdiplus;
 #include "logo.h"
+#include "lang.h"
+
+// Installer text follows the Windows language (same order as lang.h: en es pt ja zh ko).
+enum { I_DESK, I_OPEN, I_INSTALL, I_FINISH, I_RETRY, I_CANCEL, I_LBL, I_LBLDONE, I_READY, I_NOTE, I_TITLE, I_ERRDLL, I_ERRUI, I_KEEP, I_UNTITLE, I_UNDONE, I_COUNT };
+static const wchar_t* const kSet[I_COUNT][NLANG] = {
+    { L"Create a desktop shortcut", L"Crear acceso directo en el escritorio", L"Criar atalho na área de trabalho", L"デスクトップにショートカットを作成", L"创建桌面快捷方式", L"바탕 화면에 바로 가기 만들기" },
+    { L"Open Glide when finished", L"Abrir Glide al terminar", L"Abrir o Glide ao concluir", L"完了後に Glide を開く", L"完成后打开 Glide", L"완료 후 Glide 열기" },
+    { L"Install", L"Instalar", L"Instalar", L"インストール", L"安装", L"설치" },
+    { L"Finish", L"Finalizar", L"Concluir", L"完了", L"完成", L"마침" },
+    { L"Retry", L"Reintentar", L"Tentar de novo", L"再試行", L"重试", L"다시 시도" },
+    { L"Cancel", L"Cancelar", L"Cancelar", L"キャンセル", L"取消", L"취소" },
+    { L"INSTALLATION", L"INSTALACIÓN", L"INSTALAÇÃO", L"インストール", L"安装", L"설치" },
+    { L"INSTALLED", L"INSTALADO", L"INSTALADO", L"インストール完了", L"已安装", L"설치됨" },
+    { L"Glide is ready. Open it from the Start menu.", L"Glide está listo. Ábrelo desde el menú Inicio.", L"O Glide está pronto. Abra-o pelo menu Iniciar.", L"Glide の準備ができました。スタートメニューから開けます。", L"Glide 已就绪。可从开始菜单打开。", L"Glide가 준비되었습니다. 시작 메뉴에서 여세요." },
+    { L"Glide automatically blocks games with anti-cheat.", L"Glide bloquea automáticamente los juegos con anti-cheat.", L"O Glide bloqueia automaticamente jogos com anti-cheat.", L"Glide はアンチチート搭載ゲームを自動的にブロックします。", L"Glide 会自动屏蔽带反作弊的游戏。", L"Glide는 안티치트가 있는 게임을 자동으로 차단합니다." },
+    { L"Install Glide", L"Instalar Glide", L"Instalar o Glide", L"Glide のインストール", L"安装 Glide", L"Glide 설치" },
+    { L"Could not write glide.dll. If a game with Glide injected is open, close it and retry.", L"No se pudo escribir glide.dll. Si hay un juego abierto con Glide inyectado, ciérralo y reintenta.", L"Não foi possível gravar glide.dll. Se há um jogo aberto com o Glide injetado, feche-o e tente de novo.", L"glide.dll を書き込めません。Glide が注入されたゲームを閉じて再試行してください。", L"无法写入 glide.dll。如果有已注入 Glide 的游戏正在运行，请关闭后重试。", L"glide.dll을 쓸 수 없습니다. Glide가 주입된 게임이 열려 있으면 닫고 다시 시도하세요." },
+    { L"Could not write glide-ui.exe.", L"No se pudo escribir glide-ui.exe.", L"Não foi possível gravar glide-ui.exe.", L"glide-ui.exe を書き込めません。", L"无法写入 glide-ui.exe。", L"glide-ui.exe를 쓸 수 없습니다." },
+    { L"Keep your profiles and settings (glide.ini)?", L"¿Quieres conservar tus perfiles y ajustes (glide.ini)?", L"Manter seus perfis e ajustes (glide.ini)?", L"プロファイルと設定（glide.ini）を残しますか？", L"是否保留你的配置和设置（glide.ini）？", L"프로필과 설정(glide.ini)을 유지할까요?" },
+    { L"Uninstall Glide", L"Desinstalar Glide", L"Desinstalar o Glide", L"Glide のアンインストール", L"卸载 Glide", L"Glide 제거" },
+    { L"Glide has been uninstalled.", L"Glide se ha desinstalado.", L"O Glide foi desinstalado.", L"Glide をアンインストールしました。", L"Glide 已卸载。", L"Glide가 제거되었습니다." },
+};
+static int g_lang;
+static const wchar_t* I(int id) { return kSet[id][g_lang]; }
 
 static const wchar_t* kUninstKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Glide";
 static wchar_t g_dir[MAX_PATH], g_self[MAX_PATH];
@@ -57,8 +81,8 @@ static void RegStr(HKEY k, const wchar_t* n, const std::wstring& v) { RegSetValu
 static std::wstring Install(bool desktop) {
     SHCreateDirectoryExW(nullptr, g_dir, nullptr);
     KillProc(L"glide-ui.exe");
-    if (!Extract(101, In(g_dir, L"glide.dll"))) return L"No se pudo escribir glide.dll. Si hay un juego abierto con Glide inyectado, ciérralo y reintenta.";
-    if (!Extract(102, In(g_dir, L"glide-ui.exe"))) return L"No se pudo escribir glide-ui.exe.";
+    if (!Extract(101, In(g_dir, L"glide.dll"))) return I(I_ERRDLL);
+    if (!Extract(102, In(g_dir, L"glide-ui.exe"))) return I(I_ERRUI);
     std::wstring un = In(g_dir, L"uninstall.exe");
     if (_wcsicmp(g_self, un.c_str())) CopyFileW(g_self, un.c_str(), FALSE);
 
@@ -87,6 +111,7 @@ static void Uninstall(bool keepConfig) {
     DeleteFileW(In(Known(FOLDERID_Programs).c_str(), L"Glide.lnk").c_str());
     DeleteFileW(In(Known(FOLDERID_Desktop).c_str(), L"Glide.lnk").c_str());
     RegDeleteKeyW(HKEY_CURRENT_USER, kUninstKey);
+    RegDeleteKeyValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", L"Glide"); // "Start with Windows" entry of the app
     wchar_t cmd[2 * MAX_PATH + 100]; // this exe cannot delete itself while running
     swprintf_s(cmd, L"cmd.exe /c ping 127.0.0.1 -n 3 >nul & del /f /q \"%s\\uninstall.exe\" & rmdir \"%s\"", g_dir, g_dir);
     STARTUPINFOW si = { sizeof(si) }; PROCESS_INFORMATION pi;
@@ -133,13 +158,13 @@ static void DrawBtn(Graphics& g, const Btn& b) {
         bool on = b.id == C_DESK ? g_desk : g_open;
         Round(g, on ? Mix(cAccent, shade) : Mix(cInput, shade), 0, (b.h - 20) / 2, 20, 20, 6, on ? nullptr : &cBorder);
         if (on) { Pen p(Color(255, 255, 255), 2.2f); p.SetLineCap(LineCapRound, LineCapRound, DashCapRound); g.DrawLine(&p, 5.f, b.h / 2, 8.5f, b.h / 2 + 3.5f); g.DrawLine(&p, 8.5f, b.h / 2 + 3.5f, 15.f, b.h / 2 - 3.5f); }
-        Txt(g, b.id == C_DESK ? L"Crear acceso directo en el escritorio" : L"Abrir Glide al terminar", fBtn, cText, 30, 0, b.w - 30, b.h);
+        Txt(g, b.id == C_DESK ? I(I_DESK) : I(I_OPEN), fBtn, cText, 30, 0, b.w - 30, b.h);
     } else if (b.id == B_MAIN) {
         Round(g, Mix(cAccent, shade), 0, 0, b.w, b.h, 9);
-        Txt(g, g_state == 0 ? L"Instalar" : g_state == 1 ? L"Finalizar" : L"Reintentar", fBtn, Color(255, 255, 255), 0, 0, b.w, b.h, StringAlignmentCenter);
+        Txt(g, g_state == 0 ? I(I_INSTALL) : g_state == 1 ? I(I_FINISH) : I(I_RETRY), fBtn, Color(255, 255, 255), 0, 0, b.w, b.h, StringAlignmentCenter);
     } else {
         Round(g, Mix(cInput, shade), 0, 0, b.w, b.h, 9, &cBorder);
-        Txt(g, L"Cancelar", fBtn, cText, 0, 0, b.w, b.h, StringAlignmentCenter);
+        Txt(g, I(I_CANCEL), fBtn, cText, 0, 0, b.w, b.h, StringAlignmentCenter);
     }
     g.Restore(st);
 }
@@ -152,14 +177,14 @@ static void Paint(HDC dc) {
         g.Clear(cBg); g.ScaleTransform(g_k, g_k);
         DrawLogo(g, 28, 24, 68);
         Txt(g, L"Glide", fTitle, cText, 112, 26);
-        Txt(g, L"Frame pacing para DX11 / DX12", fSub, cMuted, 114, 66);
+        Txt(g, kStr[S_SUB][g_lang], fSub, cMuted, 114, 66);
         Round(g, cCard, 24, 112, 412, 150, 14, &cBorder);
-        Txt(g, g_state == 1 ? L"INSTALADO" : L"INSTALACIÓN", fLabel, cMuted, 40, 126);
+        Txt(g, g_state == 1 ? I(I_LBLDONE) : I(I_LBL), fLabel, cMuted, 40, 126);
         if (g_state == 2) { Txt(g, g_err.c_str(), fSmall, cBad, 40, 148, 380, 20); }
-        else if (g_state == 1) { Txt(g, L"Glide está listo. Ábrelo desde el menú Inicio.", fBtn, cGood, 40, 148, 380, 20); }
+        else if (g_state == 1) { Txt(g, I(I_READY), fBtn, cGood, 40, 148, 380, 20); }
         else Txt(g, g_dir, fSmall, cMuted, 40, 148, 380, 20);
         for (auto& b : g_btns) if (Shown(b.id)) DrawBtn(g, b);
-        Txt(g, L"Glide bloquea automáticamente los juegos con anti-cheat.", fSmall, cMuted, 28, 270, 410);
+        Txt(g, I(I_NOTE), fSmall, cMuted, 28, 270, 410);
     }
     BitBlt(dc, 0, 0, rc.right, rc.bottom, m, 0, 0, SRCCOPY);
     DeleteObject(bm); DeleteDC(m);
@@ -204,11 +229,13 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
     std::wstring local = Known(FOLDERID_LocalAppData);
     swprintf_s(g_dir, L"%s\\Programs\\Glide", local.c_str());
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    WORD pl = PRIMARYLANGID(GetUserDefaultUILanguage());
+    g_lang = pl == LANG_SPANISH ? 1 : pl == LANG_PORTUGUESE ? 2 : pl == LANG_JAPANESE ? 3 : pl == LANG_CHINESE ? 4 : pl == LANG_KOREAN ? 5 : 0;
 
     if (uninst) {
-        bool keep = !silent && MessageBoxW(nullptr, L"¿Quieres conservar tus perfiles y ajustes (glide.ini)?", L"Desinstalar Glide", MB_YESNO | MB_ICONQUESTION) == IDYES;
+        bool keep = !silent && MessageBoxW(nullptr, I(I_KEEP), I(I_UNTITLE), MB_YESNO | MB_ICONQUESTION) == IDYES;
         Uninstall(keep);
-        if (!silent) MessageBoxW(nullptr, L"Glide se ha desinstalado.", L"Glide", MB_ICONINFORMATION);
+        if (!silent) MessageBoxW(nullptr, I(I_UNDONE), L"Glide", MB_ICONINFORMATION);
         return 0;
     }
     if (silent) return Install(false).empty() ? 0 : 1;
@@ -216,16 +243,17 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
     SetProcessDPIAware();
     HDC sdc = GetDC(nullptr); g_k = GetDeviceCaps(sdc, LOGPIXELSX) / 96.f; ReleaseDC(nullptr, sdc);
     ULONG_PTR gdip; GdiplusStartupInput gin; GdiplusStartup(&gdip, &gin, nullptr);
-    fTitle = new Font(L"Segoe UI", 30, FontStyleBold, UnitPixel); fSub = new Font(L"Segoe UI", 14, FontStyleRegular, UnitPixel);
-    fLabel = new Font(L"Segoe UI", 11, FontStyleBold, UnitPixel); fBtn = new Font(L"Segoe UI", 13, FontStyleBold, UnitPixel);
-    fSmall = new Font(L"Segoe UI", 12, FontStyleRegular, UnitPixel);
+    const wchar_t* fam = g_lang == 3 ? L"Yu Gothic UI" : g_lang == 4 ? L"Microsoft YaHei UI" : g_lang == 5 ? L"Malgun Gothic" : L"Segoe UI";
+    fTitle = new Font(L"Segoe UI", 30, FontStyleBold, UnitPixel); fSub = new Font(fam, 14, FontStyleRegular, UnitPixel);
+    fLabel = new Font(fam, 11, FontStyleBold, UnitPixel); fBtn = new Font(fam, 13, FontStyleBold, UnitPixel);
+    fSmall = new Font(fam, 12, FontStyleRegular, UnitPixel);
 
     WNDCLASSW wc = { 0, Proc, 0, 0, hi, LoadIconW(hi, MAKEINTRESOURCEW(1)), LoadCursorW(nullptr, IDC_ARROW), nullptr, 0, L"GlideSetup" };
     RegisterClassW(&wc);
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
     RECT r = { 0, 0, S(460), S(346) }; AdjustWindowRect(&r, style, FALSE);
     int ww = r.right - r.left, wh = r.bottom - r.top;
-    g_wnd = CreateWindowW(L"GlideSetup", L"Instalar Glide", style, (GetSystemMetrics(SM_CXSCREEN) - ww) / 2, (GetSystemMetrics(SM_CYSCREEN) - wh) / 2, ww, wh, 0, 0, hi, 0);
+    g_wnd = CreateWindowW(L"GlideSetup", I(I_TITLE), style, (GetSystemMetrics(SM_CXSCREEN) - ww) / 2, (GetSystemMetrics(SM_CYSCREEN) - wh) / 2, ww, wh, 0, 0, hi, 0);
     BOOL dark = TRUE; DwmSetWindowAttribute(g_wnd, 20, &dark, sizeof(dark));
     COLORREF cap = RGB(18, 20, 24); DwmSetWindowAttribute(g_wnd, 35, &cap, sizeof(cap));
     ShowWindow(g_wnd, SW_SHOW);

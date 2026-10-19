@@ -11,7 +11,6 @@ static void DrawLogo(Graphics& g, float x, float y, float size) {
         SolidBrush fill(Color(18, 20, 24)); g.FillPath(&fill, &bg);
         Pen edge(Color(44, 48, 58), 1); g.DrawPath(&edge, &bg);
     }
-    g.TranslateTransform(-4, 0);
     GraphicsPath arc; arc.AddArc(34.f, 34.f, 60.f, 60.f, -40.f, -320.f);
     LinearGradientBrush gb(PointF(34, 34), PointF(94, 94), Color(91, 140, 255), Color(79, 209, 197));
     Pen pg(&gb, 11); pg.SetLineCap(LineCapRound, LineCapRound, DashCapRound);
