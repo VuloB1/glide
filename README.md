@@ -34,7 +34,13 @@ A plain FPS cap only controls the *average*. If frames are delivered at uneven m
 - **Live performance graph.** FPS, average, deviation and max frame time, streamed straight from the game.
 - **Six languages.** English, Español, Português, 日本語, 中文 and 한국어. Defaults to your Windows language and can be changed in the app.
 - **Start with Windows and run in the background.** Optional autostart, and closing the window can keep Glide in the system tray so auto-inject keeps working.
+- **Updates from GitHub.** Glide checks the latest release (once a day, can be turned off) and updates in one click. The installer is only run if its SHA-256 matches the digest GitHub publishes for the release.
+- **Settings and About.** A gear button opens the settings page: language, autostart, background mode, updates, and info about the program and its creator.
 - **Installer included.** Per-user install, no admin rights needed, Start Menu and optional Desktop shortcuts, clean uninstall.
+
+<div align="center">
+<img src="docs/settings.png" width="380" alt="Glide settings page">
+</div>
 
 ## Anti-cheat protection
 

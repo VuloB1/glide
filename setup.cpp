@@ -16,6 +16,7 @@ using std::min; using std::max;
 using namespace Gdiplus;
 #include "logo.h"
 #include "lang.h"
+#include "version.h"
 
 // Installer text follows the Windows language (same order as lang.h: en es pt ja zh ko).
 enum { I_DESK, I_OPEN, I_INSTALL, I_FINISH, I_RETRY, I_CANCEL, I_LBL, I_LBLDONE, I_READY, I_NOTE, I_TITLE, I_ERRDLL, I_ERRUI, I_KEEP, I_UNTITLE, I_UNDONE, I_COUNT };
@@ -81,7 +82,12 @@ static void RegStr(HKEY k, const wchar_t* n, const std::wstring& v) { RegSetValu
 static std::wstring Install(bool desktop) {
     SHCreateDirectoryExW(nullptr, g_dir, nullptr);
     KillProc(L"glide-ui.exe");
-    if (!Extract(101, In(g_dir, L"glide.dll"))) return I(I_ERRDLL);
+    std::wstring dll = In(g_dir, L"glide.dll"), old = dll + L".old";
+    DeleteFileW(old.c_str());
+    if (!Extract(101, dll)) {
+        MoveFileExW(dll.c_str(), old.c_str(), MOVEFILE_REPLACE_EXISTING);
+        if (!Extract(101, dll)) return I(I_ERRDLL);
+    }
     if (!Extract(102, In(g_dir, L"glide-ui.exe"))) return I(I_ERRUI);
     std::wstring un = In(g_dir, L"uninstall.exe");
     if (_wcsicmp(g_self, un.c_str())) CopyFileW(g_self, un.c_str(), FALSE);
@@ -92,7 +98,7 @@ static std::wstring Install(bool desktop) {
 
     HKEY k;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, kUninstKey, 0, nullptr, 0, KEY_WRITE, nullptr, &k, nullptr) == ERROR_SUCCESS) {
-        RegStr(k, L"DisplayName", L"Glide"); RegStr(k, L"DisplayVersion", L"1.0"); RegStr(k, L"Publisher", L"Glide");
+        RegStr(k, L"DisplayName", L"Glide"); RegStr(k, L"DisplayVersion", GLIDE_VER_W); RegStr(k, L"Publisher", L"Glide");
         RegStr(k, L"InstallLocation", g_dir); RegStr(k, L"DisplayIcon", exe);
         RegStr(k, L"UninstallString", L"\"" + un + L"\" /uninstall");
         DWORD one = 1, sz = 300; RegSetValueExW(k, L"NoModify", 0, REG_DWORD, (BYTE*)&one, 4); RegSetValueExW(k, L"NoRepair", 0, REG_DWORD, (BYTE*)&one, 4);
@@ -107,6 +113,7 @@ static void Uninstall(bool keepConfig) {
         std::wstring p = In(g_dir, f);
         if (!DeleteFileW(p.c_str()) && GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) MoveFileExW(p.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT); // still loaded by a game
     }
+    DeleteFileW(In(g_dir, L"glide.dll.old").c_str());
     if (!keepConfig) DeleteFileW(In(g_dir, L"glide.ini").c_str());
     DeleteFileW(In(Known(FOLDERID_Programs).c_str(), L"Glide.lnk").c_str());
     DeleteFileW(In(Known(FOLDERID_Desktop).c_str(), L"Glide.lnk").c_str());
@@ -238,7 +245,11 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
         if (!silent) MessageBoxW(nullptr, I(I_UNDONE), L"Glide", MB_ICONINFORMATION);
         return 0;
     }
-    if (silent) return Install(false).empty() ? 0 : 1;
+    if (silent) {
+        bool ok = Install(false).empty();
+        if (cmd.find(L"/open") != std::wstring::npos) ShellExecuteW(nullptr, L"open", In(g_dir, L"glide-ui.exe").c_str(), nullptr, g_dir, SW_SHOWNORMAL); // used by the in-app updater
+        return ok ? 0 : 1;
+    }
 
     SetProcessDPIAware();
     HDC sdc = GetDC(nullptr); g_k = GetDeviceCaps(sdc, LOGPIXELSX) / 96.f; ReleaseDC(nullptr, sdc);

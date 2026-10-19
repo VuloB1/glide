@@ -5,7 +5,7 @@ cl /nologo /O2 /MT /EHsc /LD glide.cpp /Fe:glide.dll /link d3d11.lib dxgi.lib us
 cl /nologo /O2 /MT /EHsc mkicon.cpp /Fe:mkicon.exe /link gdiplus.lib ole32.lib user32.lib || exit /b 1
 "%~dp0mkicon.exe" || exit /b 1
 rc /nologo glide.rc || exit /b 1
-cl /nologo /O2 /MT /EHsc /utf-8 ui.cpp glide.res /Fe:glide-ui.exe /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib gdiplus.lib dwmapi.lib uxtheme.lib shell32.lib advapi32.lib || exit /b 1
+cl /nologo /O2 /MT /EHsc /utf-8 ui.cpp glide.res /Fe:glide-ui.exe /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib gdiplus.lib dwmapi.lib uxtheme.lib shell32.lib advapi32.lib winhttp.lib || exit /b 1
 cl /nologo /O2 /MT /EHsc test.cpp /Fe:test.exe /link user32.lib || exit /b 1
 rc /nologo setup.rc || exit /b 1
 cl /nologo /O2 /MT /EHsc /utf-8 setup.cpp setup.res /Fe:glide-setup.exe /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib gdiplus.lib dwmapi.lib ole32.lib shell32.lib advapi32.lib uuid.lib || exit /b 1

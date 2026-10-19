@@ -6,7 +6,9 @@ enum Str {
     S_CAL_NOTHING, S_CAL_INJFIRST, S_CAL_STARTING, S_CAL_REMOVED, S_CAL_APPLIED, S_CAL_SAVED,
     S_MAVG, S_MDEV, S_MMAX, S_GRAPH, S_FOOT, S_NOGAMES, S_NOGAMES2, S_BLOCKED,
     S_MB_NOTFOUND, S_MB_ALREADY, S_MB_BLOCKED, S_MB_NOOPEN, S_MB_FAILED, S_AUTO_OK, S_AUTO_BLK, S_AUTO_FAIL,
-    S_LANGUAGE, S_STARTUP, S_BG, S_TRAY_OPEN, S_TRAY_EXIT, S_COUNT
+    S_LANGUAGE, S_STARTUP, S_BG, S_TRAY_OPEN, S_TRAY_EXIT,
+    S_UPDATES, S_ABOUT, S_VERSION, S_UP_CHECK, S_UP_CHECKING, S_UP_LATEST, S_UP_AVAIL, S_UP_NOW, S_UP_DL, S_UP_INST, S_UP_ERR, S_UP_ERR2, S_AUTOUP,
+    S_ABOUT_DESC, S_CREATED, S_LICENSE, S_ISSUES, S_UP_BANNER, S_COUNT
 };
 enum { NLANG = 6 };
 static const wchar_t* const kLangName[NLANG] = { L"English", L"Español", L"Português", L"日本語", L"中文", L"한국어" };
@@ -63,4 +65,22 @@ static const wchar_t* const kStr[S_COUNT][NLANG] = {
 /* BG */ { L"Run in the background", L"Seguir en segundo plano", L"Executar em segundo plano", L"バックグラウンドで実行", L"在后台运行", L"백그라운드에서 실행" },
 /* TRAY_OPEN */ { L"Open Glide", L"Abrir Glide", L"Abrir o Glide", L"Glide を開く", L"打开 Glide", L"Glide 열기" },
 /* TRAY_EXIT */ { L"Exit", L"Salir", L"Sair", L"終了", L"退出", L"종료" },
+/* UPDATES */ { L"UPDATES", L"ACTUALIZACIONES", L"ATUALIZAÇÕES", L"アップデート", L"更新", L"업데이트" },
+/* ABOUT */ { L"ABOUT", L"ACERCA DE", L"SOBRE", L"情報", L"关于", L"정보" },
+/* VERSION */ { L"Version %s", L"Versión %s", L"Versão %s", L"バージョン %s", L"版本 %s", L"버전 %s" },
+/* UP_CHECK */ { L"Check for updates", L"Buscar actualizaciones", L"Verificar atualizações", L"更新を確認", L"检查更新", L"업데이트 확인" },
+/* UP_CHECKING */ { L"Checking...", L"Buscando...", L"Verificando...", L"確認中...", L"正在检查...", L"확인 중..." },
+/* UP_LATEST */ { L"You're up to date", L"Estás al día", L"Você está atualizado", L"最新バージョンです", L"已是最新版本", L"최신 버전입니다" },
+/* UP_AVAIL */ { L"Version %s is available", L"Hay una versión nueva: %s", L"Nova versão disponível: %s", L"新しいバージョン %s があります", L"发现新版本 %s", L"새 버전 %s 사용 가능" },
+/* UP_NOW */ { L"Update now", L"Actualizar ahora", L"Atualizar agora", L"今すぐ更新", L"立即更新", L"지금 업데이트" },
+/* UP_DL */ { L"Downloading...", L"Descargando...", L"Baixando...", L"ダウンロード中...", L"正在下载...", L"다운로드 중..." },
+/* UP_INST */ { L"Installing...", L"Instalando...", L"Instalando...", L"インストール中...", L"正在安装...", L"설치 중..." },
+/* UP_ERR */ { L"Could not check for updates", L"No se pudo buscar actualizaciones", L"Não foi possível verificar atualizações", L"更新を確認できませんでした", L"无法检查更新", L"업데이트를 확인할 수 없습니다" },
+/* UP_ERR2 */ { L"Download failed or could not be verified", L"La descarga falló o no se pudo verificar", L"Falha no download ou não foi possível verificar", L"ダウンロードに失敗、または検証できませんでした", L"下载失败或无法验证", L"다운로드 실패 또는 검증 불가" },
+/* AUTOUP */ { L"Check for updates automatically", L"Buscar actualizaciones automáticamente", L"Verificar atualizações automaticamente", L"自動的に更新を確認", L"自动检查更新", L"업데이트 자동 확인" },
+/* ABOUT_DESC */ { L"Frame limiter with precise frame pacing for DX11 / DX12 games.", L"Limitador de FPS con frame pacing preciso para juegos DX11 / DX12.", L"Limitador de FPS com frame pacing preciso para jogos DX11 / DX12.", L"DX11 / DX12 ゲーム向けの高精度フレームペーシング対応FPSリミッター。", L"面向 DX11 / DX12 游戏的精准帧率节奏限制器。", L"DX11 / DX12 게임용 정밀 프레임 페이싱 FPS 제한 도구." },
+/* CREATED */ { L"Created by %s", L"Creado por %s", L"Criado por %s", L"作者：%s", L"作者：%s", L"제작: %s" },
+/* LICENSE */ { L"Free and open source · MIT License", L"Libre y de código abierto · Licencia MIT", L"Livre e de código aberto · Licença MIT", L"無料・オープンソース · MIT ライセンス", L"免费开源 · MIT 许可证", L"무료 오픈 소스 · MIT 라이선스" },
+/* ISSUES */ { L"Report an issue", L"Reportar un problema", L"Relatar um problema", L"問題を報告", L"报告问题", L"문제 신고" },
+/* UP_BANNER */ { L"Update %s available · open Settings", L"Actualización %s disponible · abre Ajustes", L"Atualização %s disponível · abra Configurações", L"アップデート %s あり · 設定を開く", L"有新版本 %s · 请打开设置", L"업데이트 %s 사용 가능 · 설정 열기" },
 };

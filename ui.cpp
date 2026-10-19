@@ -6,6 +6,9 @@
 using std::min; using std::max;
 #include <windows.h>
 #include <shellapi.h>
+#include <winhttp.h>
+#include <wincrypt.h>
+#include "version.h"
 #include <gdiplus.h>
 #include <dwmapi.h>
 #include <uxtheme.h>
@@ -21,10 +24,16 @@ using std::min; using std::max;
 struct Stats { volatile LONG head; float ms[240]; volatile LONG calState, suggest, capable, calLeft; }; // must match glide.cpp
 
 #include "lang.h"
-enum { ID_PROC = 1, ID_FPS, ID_APPLY, ID_INJECT, ID_AUTO, ID_TIMER, ID_PICK, ID_CALIB, ID_USE, ID_PRE = 10, ID_LANG = 20, ID_STARTUP, ID_BG };
+enum { ID_PROC = 1, ID_FPS, ID_APPLY, ID_INJECT, ID_AUTO, ID_TIMER, ID_PICK, ID_CALIB, ID_USE, ID_PRE = 10, ID_LANG = 20, ID_STARTUP, ID_BG, ID_GEAR, ID_UPCHK, ID_AUTOUP, ID_GITHUB, ID_ISSUES };
 static HWND hProc, hFps, g_wnd;
 static bool g_auto, g_startup, g_bg, g_quit; // g_bg: closing the window hides it to the tray instead of exiting
-static int g_lang;
+static int g_lang, g_page; // g_page: 0 main, 1 settings
+static bool g_autoUp = true;
+enum { U_IDLE, U_CHECKING, U_LATEST, U_AVAIL, U_ERR, U_DL, U_INST, U_ERR2 };
+static volatile LONG g_up; // update state; worker threads fill the strings below, then publish the state
+static std::wstring g_upTag, g_upUrl; static std::string g_upSha;
+static ULONGLONG g_nextCheck;
+static const UINT WM_UPDATE = WM_APP + 3;
 static const wchar_t* T(int id) { return kStr[id][g_lang]; }
 static std::wstring g_status; // empty = default footer hint
 static wchar_t g_dir[MAX_PATH], g_ini[MAX_PATH];
@@ -174,7 +183,7 @@ static Font *fTitle, *fSub, *fLabel, *fBig, *fSmall, *fBtn;
 static float g_k = 1;
 static const int kPre[6] = { 60, 90, 120, 144, 180, 0 };
 static HBRUSH g_brIn, g_brCard;
-static const RECT kStatsCard = { 24, 384, 536, 572 }, kPill = { 360, 22, 536, 54 };
+static const RECT kStatsCard = { 24, 384, 536, 572 }, kPill = { 312, 22, 488, 54 };
 
 static int S(int v) { return (int)(v * g_k + .5f); }
 static Color Mix(Color c, int d) { auto cl = [](int v) { return (BYTE)(v < 0 ? 0 : v > 255 ? 255 : v); }; return Color(c.GetA(), cl(c.GetR() + d), cl(c.GetG() + d), cl(c.GetB() + d)); }
@@ -198,9 +207,10 @@ static void Txt(Graphics& g, const wchar_t* s, Font* f, Color c, float x, float 
 static int CurFps() { wchar_t t[16]; GetWindowTextW(hFps, t, 16); return _wtoi(t); }
 
 // Buttons are painted and hit-tested by the main window (native child buttons leave a stray 1px edge).
-struct Btn { int id; float x, y, w, h; int str; const wchar_t* lit; }; // label = lit if set, else the translated string `str`
-static const wchar_t* Label(const Btn& b) { return b.lit ? b.lit : T(b.str); }
-static bool On(int id) { return id == ID_AUTO ? g_auto : id == ID_STARTUP ? g_startup : g_bg; }
+struct Btn { int id; float x, y, w, h; int str; const wchar_t* lit; int page; }; // label = lit if set, else the translated string `str`
+static const wchar_t* Label(const Btn& b) { return b.id == ID_UPCHK ? T(g_up == U_AVAIL ? S_UP_NOW : g_up == U_CHECKING ? S_UP_CHECKING : g_up == U_DL ? S_UP_DL : g_up == U_INST ? S_UP_INST : S_UP_CHECK) : b.lit ? b.lit : T(b.str); }
+static bool On(int id) { return id == ID_AUTO ? g_auto : id == ID_STARTUP ? g_startup : id == ID_AUTOUP ? g_autoUp : g_bg; }
+static bool Vis(const Btn& b) { return b.page < 0 || b.page == g_page; }
 static std::vector<Btn> g_btns;
 static int g_hot, g_down;
 
@@ -209,7 +219,7 @@ static void InvBtn(int id) { for (auto& b : g_btns) if (b.id == id) { RECT r = B
 static void InvPills() { for (int i = 0; i < 6; i++) InvBtn(ID_PRE + i); }
 static int HitBtn(LPARAM lp) {
     float x = (short)LOWORD(lp) / g_k, y = (short)HIWORD(lp) / g_k;
-    for (auto& b : g_btns) if ((b.id != ID_USE || g_sugg) && x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h) return b.id;
+    for (auto& b : g_btns) if (Vis(b) && (b.id != ID_USE || g_sugg) && x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h) return b.id;
     return 0;
 }
 
@@ -221,7 +231,20 @@ static void DrawBtn(Graphics& g, const Btn& b) {
         if (id == g_hot) { GraphicsPath gp; RoundPath(gp, 0.5f, 0.5f, w - 1, h - 1, 8); Pen hp(cAccent, 1.2f); g.DrawPath(&hp, &gp); }
         Pen p(shade ? cText : cMuted, 2); p.SetStartCap(LineCapRound); p.SetEndCap(LineCapRound); p.SetLineJoin(LineJoinRound);
         PointF c[3] = { PointF(w - 25, h / 2 - 2), PointF(w - 20, h / 2 + 3), PointF(w - 15, h / 2 - 2) }; g.DrawLines(&p, c, 3);
-    } else if (id == ID_AUTO || id == ID_STARTUP || id == ID_BG) { // toggle switch + label
+    } else if (id == ID_GEAR) {
+        Round(g, Mix(cCard, shade), 0, 0, w, h, 10, &cBorder);
+        Color ic = shade ? cText : cMuted;
+        if (g_page) { Pen p(ic, 2); p.SetStartCap(LineCapRound); p.SetEndCap(LineCapRound); p.SetLineJoin(LineJoinRound);
+            PointF a[3] = { PointF(w / 2 + 3, h / 2 - 7), PointF(w / 2 - 4, h / 2), PointF(w / 2 + 3, h / 2 + 7) }; g.DrawLines(&p, a, 3); }
+        else {
+            GraphicsPath gp(FillModeAlternate); PointF pts[32]; float cx = w / 2, cy = h / 2;
+            const float da[4] = { -0.30f, -0.17f, 0.17f, 0.30f }, rr[4] = { 7.5f, 10.5f, 10.5f, 7.5f };
+            for (int i = 0; i < 8; i++) for (int k = 0; k < 4; k++) { float a = i * 0.785398f + da[k]; pts[i * 4 + k] = PointF(cx + cosf(a) * rr[k], cy + sinf(a) * rr[k]); }
+            gp.AddPolygon(pts, 32); gp.AddEllipse(cx - 3.5f, cy - 3.5f, 7.f, 7.f);
+            SolidBrush gb(ic); g.FillPath(&gb, &gp);
+            if (g_up == U_AVAIL) { SolidBrush dot(cAccent); g.FillEllipse(&dot, w - 12, 4.f, 8.f, 8.f); }
+        }
+    } else if (id == ID_AUTO || id == ID_STARTUP || id == ID_BG || id == ID_AUTOUP) { // toggle switch + label
         bool on = On(id);
         Round(g, on ? Mix(cAccent, shade) : Mix(Color(66, 71, 84), shade), 0, (h - 20) / 2, 38, 20, 10);
         SolidBrush k(Color(255, 255, 255)); g.FillEllipse(&k, on ? 20.f : 2.f, (h - 16) / 2, 16.f, 16.f);
@@ -230,7 +253,7 @@ static void DrawBtn(Graphics& g, const Btn& b) {
         bool sel = kPre[id - ID_PRE] == CurFps();
         Round(g, sel ? Mix(cAccent, shade) : Mix(cInput, shade), 0, 0, w, h, h / 2);
         Txt(g, Label(b), fBtn, sel ? Color(255, 255, 255) : cText, 0, 0, w, h, StringAlignmentCenter);
-    } else if (id == ID_INJECT || id == ID_USE) {
+    } else if (id == ID_INJECT || id == ID_USE || (id == ID_UPCHK && g_up == U_AVAIL)) {
         Round(g, Mix(cAccent, shade), 0, 0, w, h, 8);
         Txt(g, Label(b), fBtn, Color(255, 255, 255), 0, 0, w, h, StringAlignmentCenter);
     } else { // secondary
@@ -428,12 +451,125 @@ static void SetLang(int l) {
     InvalidateRect(g_wnd, nullptr, FALSE);
 }
 
+// ---------- updates: GitHub releases API over HTTPS; the installer is only run if its SHA-256 matches the release's digest ----------
+static const wchar_t* kApi = L"https://api.github.com/repos/VuloB1/glide/releases/latest";
+static const wchar_t* kRelPage = L"https://github.com/VuloB1/glide/releases/latest";
+
+static bool Fetch(const std::wstring& url, std::string* mem, HANDLE file) {
+    wchar_t host[256], path[2048];
+    URL_COMPONENTSW uc = { sizeof(uc) }; uc.lpszHostName = host; uc.dwHostNameLength = 256; uc.lpszUrlPath = path; uc.dwUrlPathLength = 2048;
+    if (!WinHttpCrackUrl(url.c_str(), 0, 0, &uc) || uc.nScheme != INTERNET_SCHEME_HTTPS) return false;
+    HINTERNET ses = WinHttpOpen(L"Glide/" GLIDE_VER_W, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, nullptr, nullptr, 0);
+    HINTERNET con = ses ? WinHttpConnect(ses, host, uc.nPort, 0) : nullptr;
+    HINTERNET req = con ? WinHttpOpenRequest(con, L"GET", path, nullptr, nullptr, nullptr, WINHTTP_FLAG_SECURE) : nullptr;
+    bool ok = false;
+    if (req && WinHttpSendRequest(req, nullptr, 0, nullptr, 0, 0, 0) && WinHttpReceiveResponse(req, nullptr)) {
+        DWORD code = 0, sz = sizeof(code);
+        WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, nullptr, &code, &sz, nullptr);
+        if (code == 200) {
+            ok = true; static thread_local char buf[16384]; DWORD n;
+            while (WinHttpReadData(req, buf, sizeof(buf), &n) && n) {
+                if (mem) { mem->append(buf, n); if (mem->size() > (1u << 20)) { ok = false; break; } }
+                DWORD w; if (file && (!WriteFile(file, buf, n, &w, nullptr) || w != n)) { ok = false; break; }
+            }
+        }
+    }
+    if (req) WinHttpCloseHandle(req);
+    if (con) WinHttpCloseHandle(con);
+    if (ses) WinHttpCloseHandle(ses);
+    return ok;
+}
+
+// First string value of "key" at or after `from` (flat scan; enough for the few fields we need). "" if absent or not a string.
+static std::string JStr(const std::string& j, const char* key, size_t from) {
+    size_t p = j.find(key, from); if (p == std::string::npos) return "";
+    p = j.find(':', p); if (p == std::string::npos) return "";
+    for (p++; p < j.size() && j[p] == ' '; p++) {}
+    if (p >= j.size() || j[p] != '"') return "";
+    size_t e = j.find('"', p + 1); return e == std::string::npos ? "" : j.substr(p + 1, e - p - 1);
+}
+static std::wstring Widen(const std::string& a) { return std::wstring(a.begin(), a.end()); } // ASCII only (validated by callers)
+
+static std::string Sha256Hex(const wchar_t* path) {
+    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return "";
+    HCRYPTPROV pv = 0; HCRYPTHASH h = 0; std::string out;
+    if (CryptAcquireContextW(&pv, nullptr, nullptr, PROV_RSA_AES, CRYPT_VERIFYCONTEXT) && CryptCreateHash(pv, CALG_SHA_256, 0, 0, &h)) {
+        static BYTE buf[65536]; DWORD n;
+        while (ReadFile(f, buf, sizeof(buf), &n, nullptr) && n) CryptHashData(h, buf, n, 0);
+        BYTE d[32]; DWORD dl = 32; char x[3];
+        if (CryptGetHashParam(h, HP_HASHVAL, d, &dl, 0)) for (int i = 0; i < 32; i++) { sprintf_s(x, "%02x", d[i]); out += x; }
+    }
+    if (h) CryptDestroyHash(h);
+    if (pv) CryptReleaseContext(pv, 0);
+    CloseHandle(f);
+    return out;
+}
+
+static bool IsHex64(const std::string& s) { if (s.size() != 64) return false; for (char c : s) if (!isxdigit((unsigned char)c)) return false; return true; }
+
+static DWORD WINAPI CheckThread(LPVOID) {
+    std::string j; LONG st = U_ERR;
+    if (Fetch(kApi, &j, nullptr)) {
+        std::string tag = JStr(j, "\"tag_name\"", 0);
+        bool ok = !tag.empty() && tag.size() < 24;
+        for (char c : tag) if (!isdigit((unsigned char)c) && c != '.' && c != 'v') ok = false;
+        if (ok) {
+            int a = 0, b = 0, c = 0; std::wstring wt = Widen(tag);
+            swscanf_s(wt.c_str() + (wt[0] == L'v'), L"%d.%d.%d", &a, &b, &c);
+            bool newer = a != GLIDE_MAJ ? a > GLIDE_MAJ : b != GLIDE_MIN ? b > GLIDE_MIN : c > GLIDE_PAT;
+            std::string url, sha; size_t np = j.find("\"name\":\"glide-setup.exe\"");
+            if (np != std::string::npos) { url = JStr(j, "\"browser_download_url\"", np); sha = JStr(j, "\"digest\"", np); }
+            if (sha.compare(0, 7, "sha256:") == 0) sha = sha.substr(7); else sha.clear();
+            bool good = IsHex64(sha) && url.compare(0, 50, "https://github.com/VuloB1/glide/releases/download/") == 0 && url.find(' ') == std::string::npos;
+            g_upTag = wt.substr(wt[0] == L'v'); g_upUrl = good ? Widen(url) : L""; g_upSha = good ? sha : "";
+            st = newer ? U_AVAIL : U_LATEST;
+        }
+    }
+    InterlockedExchange(&g_up, st); PostMessageW(g_wnd, WM_UPDATE, 0, 0);
+    return 0;
+}
+static void StartCheck() {
+    InterlockedExchange(&g_up, U_CHECKING);
+    if (HANDLE t = CreateThread(nullptr, 0, CheckThread, nullptr, 0, nullptr)) CloseHandle(t); else InterlockedExchange(&g_up, U_ERR);
+}
+
+static DWORD WINAPI UpdateThread(LPVOID) {
+    wchar_t tmp[MAX_PATH]; GetTempPathW(MAX_PATH, tmp); std::wstring path = std::wstring(tmp) + L"glide-setup-update.exe";
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    bool ok = f != INVALID_HANDLE_VALUE && Fetch(g_upUrl, nullptr, f);
+    if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
+    ok = ok && _stricmp(Sha256Hex(path.c_str()).c_str(), g_upSha.c_str()) == 0;
+    if (ok) {
+        InterlockedExchange(&g_up, U_INST); PostMessageW(g_wnd, WM_UPDATE, 0, 0);
+#ifndef GLIDE_NOEXEC
+        // The installer closes this process, replaces the files and starts the new Glide (/open).
+        ok = (INT_PTR)ShellExecuteW(nullptr, L"open", path.c_str(), L"/S /open", nullptr, SW_HIDE) > 32;
+#endif
+    }
+    if (!ok) { DeleteFileW(path.c_str()); InterlockedExchange(&g_up, U_ERR2); PostMessageW(g_wnd, WM_UPDATE, 0, 0); }
+    return 0;
+}
+
+static void UpdateClick() {
+    if (g_up == U_AVAIL) {
+        if (g_upSha.empty()) { ShellExecuteW(nullptr, L"open", kRelPage, nullptr, nullptr, SW_SHOWNORMAL); return; } // no verifiable asset: let the user download it
+        InterlockedExchange(&g_up, U_DL);
+        if (HANDLE t = CreateThread(nullptr, 0, UpdateThread, nullptr, 0, nullptr)) CloseHandle(t); else InterlockedExchange(&g_up, U_ERR2);
+    } else if (g_up == U_IDLE || g_up == U_LATEST || g_up == U_ERR || g_up == U_ERR2) StartCheck();
+}
+
 static void Command(int id) {
     if (id == ID_PICK) PickProc();
+    else if (id == ID_GEAR) { g_page ^= 1; g_hot = 0; ShowWindow(hFps, g_page ? SW_HIDE : SW_SHOW); InvalidateRect(g_wnd, nullptr, FALSE); }
+    else if (id == ID_UPCHK) { UpdateClick(); InvalidateRect(g_wnd, nullptr, FALSE); }
+    else if (id == ID_AUTOUP) { g_autoUp = !g_autoUp; WritePrivateProfileStringW(L"glide", L"autoupdate", g_autoUp ? L"1" : L"0", g_ini); InvBtn(id); }
+    else if (id == ID_GITHUB) ShellExecuteW(nullptr, L"open", L"https://github.com/VuloB1/glide", nullptr, nullptr, SW_SHOWNORMAL);
+    else if (id == ID_ISSUES) ShellExecuteW(nullptr, L"open", L"https://github.com/VuloB1/glide/issues", nullptr, nullptr, SW_SHOWNORMAL);
     else if (id == ID_LANG) {
         g_pk.it.clear();
         for (int i = 0; i < NLANG; i++) g_pk.it.push_back({ kLangName[i], L"", false, i == g_lang });
-        int i = ShowPick(ID_LANG, 200, 34, false, true);
+        int i = ShowPick(ID_LANG, 200, 34, false, false);
         if (i >= 0 && i != g_lang) SetLang(i);
     }
     else if (id == ID_STARTUP) { g_startup = !g_startup; StartupSet(g_startup); InvBtn(id); }
@@ -496,6 +632,7 @@ static void Paint(HDC dc, const RECT& clip) {
         { SolidBrush dot(live ? cGood : cMuted); g.FillEllipse(&dot, kPill.left + 16.f, kPill.top + 12.f, 8.f, 8.f); }
         Txt(g, live ? T(S_LIMITING) : T(S_WAITING), fSub, live ? cGood : cMuted, kPill.left + 32.f, (float)kPill.top, 140, 32);
 
+        if (g_page == 0) {
         // cards
         Card(g, 24, 84, 512, 128, T(S_GAME));
         Card(g, 24, 228, 512, 140, T(S_FPSLIMIT));
@@ -506,12 +643,8 @@ static void Paint(HDC dc, const RECT& clip) {
         Round(g, cInput, 40, 122, 330, 32, 8, &cBorder);
         { wchar_t pn[64]; GetWindowTextW(hProc, pn, 64); Txt(g, *pn ? pn : T(S_CHOOSE), fSub, *pn ? cText : cMuted, 52, 122, 270, 32); }
         Card(g, 24, (float)kStatsCard.top, 512, 188, T(S_PERF));
-        Card(g, 24, 584, 512, 112, T(S_SETTINGS));
-        Txt(g, T(S_LANGUAGE), fSub, cMuted, 40, 620, 120, 32);
-        Round(g, cInput, 170, 620, 200, 32, 8, &cBorder);
-        Txt(g, kLangName[g_lang], fSub, cText, 182, 620, 150, 32);
 
-        for (auto& b : g_btns) if (b.id != ID_USE || g_sugg) DrawBtn(g, b);
+        for (auto& b : g_btns) if (Vis(b) && (b.id != ID_USE || g_sugg)) DrawBtn(g, b);
 
         // metrics
         wchar_t s[32]; const wchar_t* lab[4] = { L"FPS", T(S_MAVG), T(S_MDEV), T(S_MMAX) };
@@ -547,7 +680,34 @@ static void Paint(HDC dc, const RECT& clip) {
         }
 
         // status
-        Txt(g, g_status.empty() ? T(S_FOOT) : g_status.c_str(), fSmall, cMuted, 26, 706, 508);
+        if (g_status.empty() && g_up == U_AVAIL) { wchar_t ub[128]; swprintf_s(ub, T(S_UP_BANNER), g_upTag.c_str()); Txt(g, ub, fSmall, cAccent, 26, 582, 508); }
+        else Txt(g, g_status.empty() ? T(S_FOOT) : g_status.c_str(), fSmall, cMuted, 26, 582, 508);
+        } else { // settings page
+            Card(g, 24, 84, 512, 160, T(S_SETTINGS));
+            Txt(g, T(S_LANGUAGE), fSub, cMuted, 40, 122, 120, 32);
+            Round(g, cInput, 170, 122, 200, 32, 8, &cBorder);
+            Txt(g, kLangName[g_lang], fSub, cText, 182, 122, 150, 32);
+            Card(g, 24, 260, 512, 140, T(S_UPDATES));
+            wchar_t b1[128]; swprintf_s(b1, T(S_VERSION), GLIDE_VER_W);
+            Txt(g, b1, fBtn, cText, 40, 298, 320, 18);
+            const wchar_t* us = L""; Color uc = cMuted;
+            switch (g_up) {
+            case U_CHECKING: us = T(S_UP_CHECKING); break;
+            case U_LATEST: us = T(S_UP_LATEST); uc = cGood; break;
+            case U_AVAIL: swprintf_s(b1, T(S_UP_AVAIL), g_upTag.c_str()); us = b1; uc = cAccent; break;
+            case U_DL: us = T(S_UP_DL); break;
+            case U_INST: us = T(S_UP_INST); break;
+            case U_ERR: us = T(S_UP_ERR); uc = cBad; break;
+            case U_ERR2: us = T(S_UP_ERR2); uc = cBad; break;
+            }
+            Txt(g, us, fSmall, uc, 40, 320, 320, 18);
+            Card(g, 24, 416, 512, 156, T(S_ABOUT));
+            Txt(g, L"Glide " GLIDE_VER_W, fBtn, cText, 40, 450, 470, 18);
+            Txt(g, T(S_ABOUT_DESC), fSmall, cMuted, 40, 470, 470, 18);
+            swprintf_s(b1, T(S_CREATED), L"VuloB1"); Txt(g, b1, fSmall, cText, 40, 490, 470, 18);
+            Txt(g, T(S_LICENSE), fSmall, cMuted, 40, 508, 470, 18);
+            for (auto& b : g_btns) if (Vis(b)) DrawBtn(g, b);
+        }
     }
     BitBlt(dc, clip.left, clip.top, clip.right - clip.left, clip.bottom - clip.top, m, clip.left, clip.top, SRCCOPY);
     DeleteObject(bm); DeleteDC(m);
@@ -578,6 +738,7 @@ static LRESULT CALLBACK Proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TIMER: {
         static int tick;
         if (++tick % 40 == 0) AutoScan();
+        if (g_autoUp && GetTickCount64() >= g_nextCheck && (g_up == U_IDLE || g_up == U_LATEST || g_up == U_ERR)) { g_nextCheck = GetTickCount64() + 86400000ULL; StartCheck(); }
         CalibTick();
         if (!g_st) OpenStats();
         if (g_st && g_st->head != g_lastHead) { g_lastHead = g_st->head; g_lastChange = GetTickCount(); }
@@ -606,6 +767,7 @@ static LRESULT CALLBACK Proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_SHOWME: ShowMain(); return 0;
+    case WM_UPDATE: InvalidateRect(w, nullptr, FALSE); return 0;
     case WM_DESTROY: Tray(NIM_DELETE); PostQuitMessage(0); return 0;
     default:
         if (msg == g_tbCreated && g_bg) Tray(NIM_ADD); // explorer restarted
@@ -633,6 +795,8 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
     if (g_lang < 0 || g_lang >= NLANG) g_lang = def;
     g_bg = GetPrivateProfileIntW(L"glide", L"background", 0, g_ini) != 0;
     g_startup = StartupGet();
+    g_autoUp = GetPrivateProfileIntW(L"glide", L"autoupdate", 1, g_ini) != 0;
+    g_nextCheck = GetTickCount64() + 4000;
     fTitle = new Font(L"Segoe UI", 26, FontStyleBold, UnitPixel); fBig = new Font(L"Segoe UI", 24, FontStyleBold, UnitPixel);
     MakeFonts();
     g_brIn = CreateSolidBrush(RGB(38, 42, 51));
@@ -643,7 +807,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
     WNDCLASSW wc = { 0, Proc, 0, 0, hi, LoadIconW(hi, MAKEINTRESOURCEW(1)), LoadCursorW(nullptr, IDC_ARROW), nullptr, 0, L"GlideUI" };
     RegisterClassW(&wc);
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
-    RECT r = { 0, 0, S(560), S(728) }; AdjustWindowRect(&r, style, FALSE);
+    RECT r = { 0, 0, S(560), S(608) }; AdjustWindowRect(&r, style, FALSE);
     g_wnd = CreateWindowW(L"GlideUI", L"Glide", style, CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, 0, 0, hi, 0);
     HWND w = g_wnd;
     BOOL dark = TRUE; DwmSetWindowAttribute(w, 20, &dark, sizeof(dark));          // dark title bar
@@ -659,13 +823,16 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
     hProc = mk(L"EDIT", t, ES_AUTOHSCROLL, 52, 130, 276, 18, ID_PROC); // hidden: only stores the chosen process name
     ShowWindow(hProc, SW_HIDE);
     SendMessageW(hProc, EM_LIMITTEXT, 63, 0);
-    g_btns = { { ID_PICK, 40, 122, 330, 32, 0, L"" }, { ID_INJECT, 384, 122, 136, 32, S_INJECT, nullptr }, { ID_AUTO, 40, 170, 330, 26, S_AUTOINJ, nullptr },
-               { ID_APPLY, 120, 268, 80, 38, S_APPLY, nullptr }, { ID_CALIB, 40, 320, 150, 36, S_CALIB, nullptr }, { ID_USE, 428, 320, 92, 36, S_USE, nullptr },
-               { ID_LANG, 170, 620, 200, 32, 0, L"" }, { ID_STARTUP, 40, 662, 236, 26, S_STARTUP, nullptr }, { ID_BG, 284, 662, 236, 26, S_BG, nullptr } };
+    g_btns = { { ID_PICK, 40, 122, 330, 32, 0, L"", 0 }, { ID_INJECT, 384, 122, 136, 32, S_INJECT, nullptr, 0 }, { ID_AUTO, 40, 170, 330, 26, S_AUTOINJ, nullptr, 0 },
+               { ID_APPLY, 120, 268, 80, 38, S_APPLY, nullptr, 0 }, { ID_CALIB, 40, 320, 150, 36, S_CALIB, nullptr, 0 }, { ID_USE, 428, 320, 92, 36, S_USE, nullptr, 0 },
+               { ID_GEAR, 496, 20, 40, 36, 0, L"", -1 },
+               { ID_LANG, 170, 122, 200, 32, 0, L"", 1 }, { ID_STARTUP, 40, 170, 330, 26, S_STARTUP, nullptr, 1 }, { ID_BG, 40, 204, 330, 26, S_BG, nullptr, 1 },
+               { ID_UPCHK, 372, 288, 148, 36, S_UP_CHECK, nullptr, 1 }, { ID_AUTOUP, 40, 350, 330, 26, S_AUTOUP, nullptr, 1 },
+               { ID_GITHUB, 40, 532, 120, 32, 0, L"GitHub", 1 }, { ID_ISSUES, 168, 532, 190, 32, S_ISSUES, nullptr, 1 } };
 
     hFps = mk(L"EDIT", L"", ES_NUMBER | ES_CENTER | ES_AUTOHSCROLL, 50, 277, 50, 20, ID_FPS);
     const wchar_t* pl[6] = { L"60", L"90", L"120", L"144", L"180", L"∞" };
-    for (int i = 0; i < 6; i++) g_btns.push_back({ ID_PRE + i, 212.f + i * 50, 268, 46, 38, 0, pl[i] });
+    for (int i = 0; i < 6; i++) g_btns.push_back({ ID_PRE + i, 212.f + i * 50, 268, 46, 38, 0, pl[i], 0 });
     LoadProfile();
     SetTimer(w, ID_TIMER, 50, nullptr);
     if (g_bg) Tray(NIM_ADD);
