@@ -1,0 +1,10 @@
+*.obj
+*.res
+*.exe
+*.dll
+*.ico
+*.lib
+*.exp
+test.exe
+glide.ini
+ui.png
