@@ -33,7 +33,7 @@ static bool g_autoUp = true;
 enum { U_IDLE, U_CHECKING, U_LATEST, U_AVAIL, U_ERR, U_DL, U_INST, U_ERR2 };
 static volatile LONG g_up; // update state; worker threads fill the strings below, then publish the state
 static std::wstring g_upTag, g_upUrl; static std::string g_upSha;
-static ULONGLONG g_nextCheck;
+static ULONGLONG g_nextCheck, g_nextClean;
 static const UINT WM_UPDATE = WM_APP + 3;
 static const wchar_t* T(int id) { return kStr[id][g_lang]; }
 static std::wstring g_status; // empty = default footer hint
@@ -755,6 +755,10 @@ static LRESULT CALLBACK Proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TIMER: {
         ULONGLONG now = GetTickCount64(); static ULONGLONG nextScan;
         if (now >= nextScan) { nextScan = now + 2000; AutoScan(); }
+        if (g_nextClean && now >= g_nextClean) {
+            g_nextClean = 0; wchar_t tmp[MAX_PATH]; GetTempPathW(MAX_PATH, tmp);
+            DeleteFileW((std::wstring(tmp) + L"glide-setup-update.exe").c_str());
+        }
         if (g_autoUp && now >= g_nextCheck && (g_up == U_IDLE || g_up == U_LATEST || g_up == U_ERR)) { g_nextCheck = now + 86400000ULL; StartCheck(); }
         CalibTick();
         if (!g_st) OpenStats();
@@ -826,6 +830,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
     g_startup = StartupGet();
     g_autoUp = GetPrivateProfileIntW(L"glide", L"autoupdate", 1, g_ini) != 0;
     g_nextCheck = GetTickCount64() + 4000;
+    g_nextClean = GetTickCount64() + 8000; // the updater leaves its downloaded installer in %TEMP%; remove it once the installer has exited
     fTitle = new Font(L"Segoe UI", 26, FontStyleBold, UnitPixel); fBig = new Font(L"Segoe UI", 24, FontStyleBold, UnitPixel);
     MakeFonts();
     g_brIn = CreateSolidBrush(RGB(38, 42, 51));
