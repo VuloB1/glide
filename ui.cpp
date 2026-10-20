@@ -6,6 +6,7 @@
 using std::min; using std::max;
 #include <windows.h>
 #include <shellapi.h>
+#include <psapi.h>
 #include <winhttp.h>
 #include <wincrypt.h>
 #include "version.h"
@@ -174,9 +175,11 @@ static void Inject() {
 static void AutoScan() {
     wchar_t names[4096], msg[160];
     GetPrivateProfileSectionNamesW(names, 4096, g_ini);
+    std::vector<const wchar_t*> autos;
+    for (wchar_t* n = names; *n; n += wcslen(n) + 1) if (GetPrivateProfileIntW(n, L"auto", 0, g_ini)) autos.push_back(n);
+    if (autos.empty()) return;
     auto wins = WindowPids(); auto procs = Procs();
-    for (wchar_t* n = names; *n; n += wcslen(n) + 1) {
-        if (!GetPrivateProfileIntW(n, L"auto", 0, g_ini)) continue;
+    for (const wchar_t* n : autos) {
         for (auto& p : procs) {
             if (_wcsicmp(p.second.c_str(), n) || !wins.count(p.first) || !g_tried.insert(p.first).second) continue;
             if (ScanModules(p.first).glide) continue;
@@ -623,110 +626,122 @@ static void Card(Graphics& g, float x, float y, float w, float h, const wchar_t*
     Txt(g, title, fLabel, cMuted, x + 16, y + 14);
 }
 
+static bool IsLive() { return g_st && GetTickCount() - g_lastChange < 1500 && g_st->head > 1; }
+
+// Draws only the sections that intersect `clip` (the timer invalidates small regions, so a live graph costs a fraction of a full repaint).
 static void Paint(HDC dc, const RECT& clip) {
-    RECT rc; GetClientRect(g_wnd, &rc);
-    HDC m = CreateCompatibleDC(dc); HBITMAP bm = CreateCompatibleBitmap(dc, rc.right, rc.bottom); SelectObject(m, bm);
+    int cw = clip.right - clip.left, ch = clip.bottom - clip.top; if (cw <= 0 || ch <= 0) return;
+    HDC m = CreateCompatibleDC(dc); HBITMAP bm = CreateCompatibleBitmap(dc, cw, ch); HGDIOBJ old = SelectObject(m, bm);
     {
         Graphics g(m); g.SetSmoothingMode(SmoothingModeAntiAlias); g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
-        g.Clear(cBg); g.ScaleTransform(g_k, g_k);
+        g.Clear(cBg); g.TranslateTransform((float)-clip.left, (float)-clip.top); g.ScaleTransform(g_k, g_k);
+        auto Sec = [&](int y0, int y1) { return S(y0) < clip.bottom && S(y1) > clip.top; };
 
-        // live data
-        bool live = g_st && GetTickCount() - g_lastChange < 1500 && g_st->head > 1;
+        bool live = IsLive();
         float v[240]; int n = 0; double mean = 0, var = 0, mx = 0;
-        if (live) {
+        if (live && Sec(384, 572)) {
             LONG head = g_st->head; n = head < 240 ? head : 240;
             for (int i = 0; i < n; i++) { v[i] = g_st->ms[(head - n + i) % 240]; mean += v[i]; if (v[i] > mx) mx = v[i]; }
             mean /= n;
             for (int i = 0; i < n; i++) var += (v[i] - mean) * (v[i] - mean);
         }
 
-        // header
-        DrawLogo(g, 24, 14, 48);
-        Txt(g, L"Glide", fTitle, cText, 82, 12);
-        Txt(g, T(S_SUB), fSub, cMuted, 84, 48);
-        Round(g, cCard, (float)kPill.left, (float)kPill.top, 176, 32, 16, &cBorder);
-        { SolidBrush dot(live ? cGood : cMuted); g.FillEllipse(&dot, kPill.left + 16.f, kPill.top + 12.f, 8.f, 8.f); }
-        Txt(g, live ? T(S_LIMITING) : T(S_WAITING), fSub, live ? cGood : cMuted, kPill.left + 32.f, (float)kPill.top, 140, 32);
+        if (Sec(0, 84)) { // header
+            DrawLogo(g, 24, 14, 48);
+            Txt(g, L"Glide", fTitle, cText, 82, 12);
+            Txt(g, T(S_SUB), fSub, cMuted, 84, 48);
+            Round(g, cCard, (float)kPill.left, (float)kPill.top, 176, 32, 16, &cBorder);
+            { SolidBrush dot(live ? cGood : cMuted); g.FillEllipse(&dot, kPill.left + 16.f, kPill.top + 12.f, 8.f, 8.f); }
+            Txt(g, live ? T(S_LIMITING) : T(S_WAITING), fSub, live ? cGood : cMuted, kPill.left + 32.f, (float)kPill.top, 140, 32);
+        }
 
         if (g_page == 0) {
-        // cards
-        Card(g, 24, 84, 512, 128, T(S_GAME));
-        Card(g, 24, 228, 512, 140, T(S_FPSLIMIT));
-        wchar_t c1[96], c2[96]; swprintf_s(c1, T(g_c1.id), g_c1.arg); swprintf_s(c2, T(g_c2.id), g_c2.arg);
-        Txt(g, c1, fBtn, cText, 204, 318, 216, 16);
-        Txt(g, c2, fSmall, cMuted, 204, 336, 216, 16);
-        Round(g, cInput, 40, 268, 70, 38, 8, &cBorder);
-        Round(g, cInput, 40, 122, 330, 32, 8, &cBorder);
-        { wchar_t pn[64]; GetWindowTextW(hProc, pn, 64); Txt(g, *pn ? pn : T(S_CHOOSE), fSub, *pn ? cText : cMuted, 52, 122, 270, 32); }
-        Card(g, 24, (float)kStatsCard.top, 512, 188, T(S_PERF));
-
-        for (auto& b : g_btns) if (Vis(b) && (b.id != ID_USE || g_sugg)) DrawBtn(g, b);
-
-        // metrics
-        wchar_t s[32]; const wchar_t* lab[4] = { L"FPS", T(S_MAVG), T(S_MDEV), T(S_MMAX) };
-        double val[4] = { live ? 1000 / mean : 0, mean, sqrt(n ? var / n : 0), mx };
-        for (int i = 0; i < 4; i++) {
-            float x = 40.f + i * 126;
-            if (live) swprintf_s(s, i ? L"%.2f" : L"%.0f", val[i]); else wcscpy_s(s, L"--");
-            Txt(g, s, fBig, i == 0 && live ? cAccent : cText, x, 412);
-            Txt(g, lab[i], fSmall, cMuted, x, 444);
-        }
-
-        // frametime graph
-        float gx = 40, gy = 466, gw = 480, gh = 92;
-        Round(g, Color(20, 22, 27), gx, gy, gw, gh, 10);
-        if (live) {
-            double top = mean * 2;
-            PointF pts[240];
-            for (int i = 0; i < n; i++) {
-                float y = (float)(v[i] / top); if (y > 1) y = 1;
-                pts[i] = PointF(gx + 6 + (240 - n + i) * (gw - 12) / 239, gy + gh - 6 - y * (gh - 12));
+            if (Sec(84, 212)) {
+                Card(g, 24, 84, 512, 128, T(S_GAME));
+                Round(g, cInput, 40, 122, 330, 32, 8, &cBorder);
+                wchar_t pn[64]; GetWindowTextW(hProc, pn, 64); Txt(g, *pn ? pn : T(S_CHOOSE), fSub, *pn ? cText : cMuted, 52, 122, 270, 32);
             }
-            GraphicsPath area; area.AddLines(pts, n);
-            area.AddLine(pts[n - 1].X, gy + gh - 6, pts[0].X, gy + gh - 6); area.CloseFigure();
-            LinearGradientBrush grad(PointF(0, gy), PointF(0, gy + gh), Color(80, 91, 140, 255), Color(0, 91, 140, 255));
-            g.FillPath(&grad, &area);
-            Pen mid(Color(70, 255, 255, 255), 1); mid.SetDashStyle(DashStyleDash);
-            g.DrawLine(&mid, gx + 6, gy + gh / 2, gx + gw - 6, gy + gh / 2);
-            Pen line(cAccent, 1.8f); line.SetLineJoin(LineJoinRound); g.DrawLines(&line, pts, n);
-            SolidBrush bad(cBad);
-            for (int i = 0; i < n; i++) if (fabs(v[i] - mean) > mean * 0.15) g.FillEllipse(&bad, pts[i].X - 2.5f, pts[i].Y - 2.5f, 5.f, 5.f);
-        } else {
-            Txt(g, T(S_GRAPH), fSub, cMuted, gx, gy, gw, gh, StringAlignmentCenter);
-        }
-
-        // status
-        if (g_status.empty() && g_up == U_AVAIL) { wchar_t ub[128]; swprintf_s(ub, T(S_UP_BANNER), g_upTag.c_str()); Txt(g, ub, fSmall, cAccent, 26, 582, 508); }
-        else Txt(g, g_status.empty() ? T(S_FOOT) : g_status.c_str(), fSmall, cMuted, 26, 582, 508);
+            if (Sec(228, 368)) {
+                Card(g, 24, 228, 512, 140, T(S_FPSLIMIT));
+                wchar_t c1[96], c2[96]; swprintf_s(c1, T(g_c1.id), g_c1.arg); swprintf_s(c2, T(g_c2.id), g_c2.arg);
+                Txt(g, c1, fBtn, cText, 204, 318, 216, 16);
+                Txt(g, c2, fSmall, cMuted, 204, 336, 216, 16);
+                Round(g, cInput, 40, 268, 70, 38, 8, &cBorder);
+            }
+            if (Sec(384, 572)) {
+                // The timer only invalidates the numbers row and the graph, so the static title/labels are skipped (DrawString is the expensive part).
+                Round(g, cCard, 24, (float)kStatsCard.top, 512, 188, 14, &cBorder);
+                if (Sec(396, 420)) Txt(g, T(S_PERF), fLabel, cMuted, 40, 398);
+                wchar_t s[32]; const wchar_t* lab[4] = { L"FPS", T(S_MAVG), T(S_MDEV), T(S_MMAX) };
+                double val[4] = { live ? 1000 / mean : 0, mean, sqrt(n ? var / n : 0), mx };
+                if (Sec(408, 442)) for (int i = 0; i < 4; i++) {
+                    float x = 40.f + i * 126;
+                    if (live) swprintf_s(s, i ? L"%.2f" : L"%.0f", val[i]); else wcscpy_s(s, L"--");
+                    Txt(g, s, fBig, i == 0 && live ? cAccent : cText, x, 412);
+                }
+                if (Sec(444, 462)) for (int i = 0; i < 4; i++) Txt(g, lab[i], fSmall, cMuted, 40.f + i * 126, 444);
+                float gx = 40, gy = 466, gw = 480, gh = 92; // frametime graph
+                if (Sec(466, 558)) Round(g, Color(20, 22, 27), gx, gy, gw, gh, 10);
+                if (live && Sec(466, 558)) {
+                    double top = mean * 2;
+                    PointF pts[240];
+                    for (int i = 0; i < n; i++) {
+                        float y = (float)(v[i] / top); if (y > 1) y = 1;
+                        pts[i] = PointF(gx + 6 + (240 - n + i) * (gw - 12) / 239, gy + gh - 6 - y * (gh - 12));
+                    }
+                    GraphicsPath area; area.AddLines(pts, n);
+                    area.AddLine(pts[n - 1].X, gy + gh - 6, pts[0].X, gy + gh - 6); area.CloseFigure();
+                    LinearGradientBrush grad(PointF(0, gy), PointF(0, gy + gh), Color(80, 91, 140, 255), Color(0, 91, 140, 255));
+                    g.FillPath(&grad, &area);
+                    Pen mid(Color(70, 255, 255, 255), 1); mid.SetDashStyle(DashStyleDash);
+                    g.DrawLine(&mid, gx + 6, gy + gh / 2, gx + gw - 6, gy + gh / 2);
+                    Pen line(cAccent, 1.8f); line.SetLineJoin(LineJoinRound); g.DrawLines(&line, pts, n);
+                    SolidBrush bad(cBad);
+                    for (int i = 0; i < n; i++) if (fabs(v[i] - mean) > mean * 0.15) g.FillEllipse(&bad, pts[i].X - 2.5f, pts[i].Y - 2.5f, 5.f, 5.f);
+                } else if (Sec(466, 558)) {
+                    Txt(g, T(S_GRAPH), fSub, cMuted, gx, gy, gw, gh, StringAlignmentCenter);
+                }
+            }
+            if (Sec(572, 608)) {
+                if (g_status.empty() && g_up == U_AVAIL) { wchar_t ub[128]; swprintf_s(ub, T(S_UP_BANNER), g_upTag.c_str()); Txt(g, ub, fSmall, cAccent, 26, 582, 508); }
+                else Txt(g, g_status.empty() ? T(S_FOOT) : g_status.c_str(), fSmall, cMuted, 26, 582, 508);
+            }
         } else { // settings page
-            Card(g, 24, 84, 512, 160, T(S_SETTINGS));
-            Txt(g, T(S_LANGUAGE), fSub, cMuted, 40, 122, 120, 32);
-            Round(g, cInput, 170, 122, 200, 32, 8, &cBorder);
-            Txt(g, kLangName[g_lang], fSub, cText, 182, 122, 150, 32);
-            Card(g, 24, 260, 512, 140, T(S_UPDATES));
-            wchar_t b1[128]; swprintf_s(b1, T(S_VERSION), GLIDE_VER_W);
-            Txt(g, b1, fBtn, cText, 40, 298, 320, 18);
-            const wchar_t* us = L""; Color uc = cMuted;
-            switch (g_up) {
-            case U_CHECKING: us = T(S_UP_CHECKING); break;
-            case U_LATEST: us = T(S_UP_LATEST); uc = cGood; break;
-            case U_AVAIL: swprintf_s(b1, T(S_UP_AVAIL), g_upTag.c_str()); us = b1; uc = cAccent; break;
-            case U_DL: us = T(S_UP_DL); break;
-            case U_INST: us = T(S_UP_INST); break;
-            case U_ERR: us = T(S_UP_ERR); uc = cBad; break;
-            case U_ERR2: us = T(S_UP_ERR2); uc = cBad; break;
+            wchar_t b1[128];
+            if (Sec(84, 244)) {
+                Card(g, 24, 84, 512, 160, T(S_SETTINGS));
+                Txt(g, T(S_LANGUAGE), fSub, cMuted, 40, 122, 120, 32);
+                Round(g, cInput, 170, 122, 200, 32, 8, &cBorder);
+                Txt(g, kLangName[g_lang], fSub, cText, 182, 122, 150, 32);
             }
-            Txt(g, us, fSmall, uc, 40, 320, 320, 18);
-            Card(g, 24, 416, 512, 156, T(S_ABOUT));
-            Txt(g, L"Glide " GLIDE_VER_W, fBtn, cText, 40, 450, 470, 18);
-            Txt(g, T(S_ABOUT_DESC), fSmall, cMuted, 40, 470, 470, 18);
-            swprintf_s(b1, T(S_CREATED), L"VuloB1"); Txt(g, b1, fSmall, cText, 40, 490, 470, 18);
-            Txt(g, T(S_LICENSE), fSmall, cMuted, 40, 508, 470, 18);
-            for (auto& b : g_btns) if (Vis(b)) DrawBtn(g, b);
+            if (Sec(260, 400)) {
+                Card(g, 24, 260, 512, 140, T(S_UPDATES));
+                swprintf_s(b1, T(S_VERSION), GLIDE_VER_W);
+                Txt(g, b1, fBtn, cText, 40, 298, 320, 18);
+                const wchar_t* us = L""; Color uc = cMuted;
+                switch (g_up) {
+                case U_CHECKING: us = T(S_UP_CHECKING); break;
+                case U_LATEST: us = T(S_UP_LATEST); uc = cGood; break;
+                case U_AVAIL: swprintf_s(b1, T(S_UP_AVAIL), g_upTag.c_str()); us = b1; uc = cAccent; break;
+                case U_DL: us = T(S_UP_DL); break;
+                case U_INST: us = T(S_UP_INST); break;
+                case U_ERR: us = T(S_UP_ERR); uc = cBad; break;
+                case U_ERR2: us = T(S_UP_ERR2); uc = cBad; break;
+                }
+                Txt(g, us, fSmall, uc, 40, 320, 320, 18);
+            }
+            if (Sec(416, 572)) {
+                Card(g, 24, 416, 512, 156, T(S_ABOUT));
+                Txt(g, L"Glide " GLIDE_VER_W, fBtn, cText, 40, 450, 470, 18);
+                Txt(g, T(S_ABOUT_DESC), fSmall, cMuted, 40, 470, 470, 18);
+                swprintf_s(b1, T(S_CREATED), L"VuloB1"); Txt(g, b1, fSmall, cText, 40, 490, 470, 18);
+                Txt(g, T(S_LICENSE), fSmall, cMuted, 40, 508, 470, 18);
+            }
         }
+        for (auto& b : g_btns) { RECT r = BtnRect(b), x; if (Vis(b) && (b.id != ID_USE || g_sugg) && IntersectRect(&x, &r, &clip)) DrawBtn(g, b); }
     }
-    BitBlt(dc, clip.left, clip.top, clip.right - clip.left, clip.bottom - clip.top, m, clip.left, clip.top, SRCCOPY);
-    DeleteObject(bm); DeleteDC(m);
+    BitBlt(dc, clip.left, clip.top, cw, ch, m, 0, 0, SRCCOPY);
+    SelectObject(m, old); DeleteObject(bm); DeleteDC(m);
 }
 
 static LRESULT CALLBACK Proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
@@ -752,16 +767,28 @@ static LRESULT CALLBACK Proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONUP: { int d = g_down; g_down = 0; ReleaseCapture(); InvBtn(d); if (d && d == HitBtn(lp)) Command(d); return 0; }
     case WM_ERASEBKGND: return 1;
     case WM_TIMER: {
-        static int tick;
-        if (++tick % 40 == 0) AutoScan();
-        if (g_autoUp && GetTickCount64() >= g_nextCheck && (g_up == U_IDLE || g_up == U_LATEST || g_up == U_ERR)) { g_nextCheck = GetTickCount64() + 86400000ULL; StartCheck(); }
+        ULONGLONG now = GetTickCount64(); static ULONGLONG nextScan;
+        if (now >= nextScan) { nextScan = now + 2000; AutoScan(); }
+        if (g_autoUp && now >= g_nextCheck && (g_up == U_IDLE || g_up == U_LATEST || g_up == U_ERR)) { g_nextCheck = now + 86400000ULL; StartCheck(); }
         CalibTick();
         if (!g_st) OpenStats();
         if (g_st && g_st->head != g_lastHead) { g_lastHead = g_st->head; g_lastChange = GetTickCount(); }
         else if (g_st && GetTickCount() - g_lastChange > 3000) OpenStats(); // game restarted: re-attach
-        RECT a = { S(kStatsCard.left), S(kStatsCard.top), S(kStatsCard.right), S(kStatsCard.bottom) }, b = { S(kPill.left), S(kPill.top), S(kPill.right), S(kPill.bottom) };
-        RECT c = { S(24), S(316), S(536), S(372) };
-        InvalidateRect(w, &a, FALSE); InvalidateRect(w, &b, FALSE); InvalidateRect(w, &c, FALSE);
+        bool vis = IsWindowVisible(w) && !IsIconic(w), live = IsLive();
+        static bool visPrev = true, livePrev; static LONG headPrev; static int sigPrev;
+        if (vis) {
+            RECT a = { S(40), S(406), S(520), S(442) }, a2 = { S(40), S(466), S(520), S(558) }, b = { S(kPill.left), S(kPill.top), S(kPill.right), S(kPill.bottom) };
+            RECT c = { S(24), S(316), S(536), S(372) };
+            if (live != livePrev) { InvalidateRect(w, &b, FALSE); if (!g_page) { InvalidateRect(w, &a, FALSE); InvalidateRect(w, &a2, FALSE); } }
+            else if (live && !g_page && g_st->head != headPrev) { InvalidateRect(w, &a, FALSE); InvalidateRect(w, &a2, FALSE); }
+            int sig = (g_c1.id * 31 + g_c1.arg) * 31 + g_c2.id * 31 + g_c2.arg + g_sugg * 7;
+            if (sig != sigPrev && !g_page) InvalidateRect(w, &c, FALSE);
+            sigPrev = sig;
+        } else if (visPrev) K32EmptyWorkingSet(GetCurrentProcess()); // just went to the tray / minimized: give the memory back
+        livePrev = live; headPrev = g_st ? g_st->head : 0; visPrev = vis;
+        UINT want = !vis ? 1000 : (live || g_calWait) ? (GetForegroundWindow() == w ? 66 : 150) : 250; // animate only while something moves
+        static UINT cur = 50;
+        if (want != cur) { cur = want; SetTimer(w, ID_TIMER, want, nullptr); }
         return 0;
     }
     case WM_PAINT: {

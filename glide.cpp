@@ -29,14 +29,23 @@ static void LoadConfig(LONGLONG now) {
     g_calReq = GetPrivateProfileIntW(g_exe, L"calibrate", 0, g_ini) != 0;
 }
 
-// Sleep on a high-resolution timer until ~1.5 ms before the deadline, then spin.
+// Sleep on a high-resolution timer until `g_margin` before the deadline, then spin. The margin follows how late the timer really wakes
+// (99th percentile of the last 256 waits + 10%, between 0.5 and 2.5 ms): a fixed 1.5 ms spin costs ~25% of a core at 177 FPS, most of it wasted.
+static LONGLONG g_margin, g_over[256]; static int g_overN;
 static void WaitUntil(LONGLONG deadline) {
-    LONGLONG margin = g_freq * 3 / 2000;
+    if (!g_margin) g_margin = g_freq * 3 / 2000;
     LONGLONG left = deadline - Now();
-    if (left > margin && g_timer) {
-        LARGE_INTEGER due; due.QuadPart = -((left - margin) * 10000000LL / g_freq);
+    if (left > g_margin && g_timer) {
+        LONGLONG wake = deadline - g_margin;
+        LARGE_INTEGER due; due.QuadPart = -((left - g_margin) * 10000000LL / g_freq);
         SetWaitableTimer(g_timer, &due, 0, nullptr, nullptr, FALSE);
         WaitForSingleObject(g_timer, 100);
+        LONGLONG over = Now() - wake; g_over[g_overN++] = over < 0 ? 0 : over;
+        if (g_overN == 256) {
+            std::sort(g_over, g_over + 256);
+            LONGLONG want = g_over[253] * 11 / 10 + g_freq / 10000, lo = g_freq / 2000, hi = g_freq * 5 / 2000;
+            g_margin = want < lo ? lo : want > hi ? hi : want; g_overN = 0;
+        }
     }
     while (Now() < deadline) YieldProcessor();
 }
@@ -248,12 +257,12 @@ static DWORD WINAPI Init(LPVOID) {
     LoadConfig(Now());
     HANDLE m = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(Stats), L"Local\\glide_stats");
     if (m) g_stats = (Stats*)MapViewOfFile(m, FILE_MAP_WRITE, 0, 0, sizeof(Stats));
-    bool dx = false, vk = false;
+    bool dx = false, vk = false; int ticks = 0;
     for (;;) { // DX games: hook once dxgi.dll is there. OpenGL games (e.g. Minecraft Java): patch SwapBuffers imports as modules appear.
         if (!dx && GetModuleHandleW(L"dxgi.dll")) { dx = true; HookDxgi(); }
         if (!vk && GetModuleHandleW(L"vulkan-1.dll")) { vk = true; HookVulkan(); }
         if (GetModuleHandleW(L"opengl32.dll")) ScanGl();
-        Sleep(500);
+        Sleep(++ticks < 40 ? 500 : 3000); // modules load mostly at startup: poll fast for 20 s, then rarely
     }
 }
 

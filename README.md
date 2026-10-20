@@ -36,6 +36,7 @@ A plain FPS cap only controls the *average*. If frames are delivered at uneven m
 - **Start with Windows and run in the background.** Optional autostart, and closing the window can keep Glide in the system tray so auto-inject keeps working.
 - **Updates from GitHub.** Glide checks the latest release (once a day, can be turned off) and updates in one click. The installer is only run if its SHA-256 matches the digest GitHub publishes for the release.
 - **Settings and About.** A gear button opens the settings page: language, autostart, background mode, updates, and info about the program and its creator.
+- **Light on resources.** The spin-wait before each frame adapts to your machine's timer jitter (about half the CPU of a fixed margin at 177 FPS with the same precision), and the window repaints only what changed: ~2% of a core with the live graph, ~0% and ~3 MB when minimized or in the tray.
 - **Installer included.** Per-user install, no admin rights needed, Start Menu and optional Desktop shortcuts, clean uninstall.
 
 <div align="center">
