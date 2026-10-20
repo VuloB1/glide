@@ -14,7 +14,7 @@ enum { NLANG = 6 };
 static const wchar_t* const kLangName[NLANG] = { L"English", L"Español", L"Português", L"日本語", L"中文", L"한국어" };
 
 static const wchar_t* const kStr[S_COUNT][NLANG] = {
-/* SUB */ { L"Frame pacing for DX11 / DX12", L"Frame pacing para DX11 / DX12", L"Frame pacing para DX11 / DX12", L"DX11 / DX12 向けフレームペーシング", L"DX11 / DX12 帧率节奏控制", L"DX11 / DX12용 프레임 페이싱" },
+/* SUB */ { L"DX11 / DX12 / OpenGL frame pacing", L"Frame pacing DX11 / DX12 / OpenGL", L"Frame pacing DX11 / DX12 / OpenGL", L"DX11 / DX12 / OpenGL 対応", L"支持 DX11 / DX12 / OpenGL", L"DX11 / DX12 / OpenGL 지원" },
 /* LIMITING */ { L"Limiting", L"Limitando", L"Limitando", L"制限中", L"限制中", L"제한 중" },
 /* WAITING */ { L"Waiting for game", L"Esperando juego", L"Aguardando jogo", L"ゲーム待機中", L"等待游戏", L"게임 대기 중" },
 /* GAME */ { L"GAME", L"JUEGO", L"JOGO", L"ゲーム", L"游戏", L"게임" },

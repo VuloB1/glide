@@ -4,6 +4,8 @@
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <algorithm>
+#include <set>
+#include <tlhelp32.h>
 
 static HMODULE g_mod;
 static LONGLONG g_freq, g_next, g_interval, g_lastCfg;
@@ -112,6 +114,47 @@ static void Patch(void** slot, void* hook, void** orig) {
     VirtualProtect(slot, sizeof(void*), old, &old);
 }
 
+// ---- OpenGL: SwapBuffers / wglSwapBuffers, hooked by rewriting the import tables of loaded modules (GLFW/LWJGL call SwapBuffers from gdi32) ----
+typedef BOOL(WINAPI* SwapFn)(HDC);
+static SwapFn g_swapGdi, g_swapWgl;
+static BOOL WINAPI HkSwapGdi(HDC dc) {
+    if (t_in) return g_swapGdi(dc);
+    t_in = true; Limit(); BOOL r = g_swapGdi(dc); t_in = false; return r;
+}
+static BOOL WINAPI HkSwapWgl(HDC dc) {
+    if (t_in) return g_swapWgl(dc);
+    t_in = true; Limit(); BOOL r = g_swapWgl(dc); t_in = false; return r;
+}
+
+static void PatchIat(HMODULE m) {
+    BYTE* base = (BYTE*)m;
+    __try {
+        auto dos = (IMAGE_DOS_HEADER*)base; if (dos->e_magic != IMAGE_DOS_SIGNATURE) return;
+        auto nt = (IMAGE_NT_HEADERS*)(base + dos->e_lfanew); if (nt->Signature != IMAGE_NT_SIGNATURE) return;
+        auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT]; if (!dir.VirtualAddress) return;
+        for (auto d = (IMAGE_IMPORT_DESCRIPTOR*)(base + dir.VirtualAddress); d->Name; d++)
+            for (auto t = (IMAGE_THUNK_DATA*)(base + d->FirstThunk); t->u1.Function; t++) {
+                void** slot = (void**)&t->u1.Function; void* dummy;
+                if (g_swapGdi && *slot == (void*)g_swapGdi) Patch(slot, HkSwapGdi, &dummy);
+                else if (g_swapWgl && *slot == (void*)g_swapWgl) Patch(slot, HkSwapWgl, &dummy);
+            }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+static void ScanGl() {
+    if (!g_swapGdi) g_swapGdi = (SwapFn)GetProcAddress(GetModuleHandleW(L"gdi32.dll"), "SwapBuffers");
+    if (!g_swapWgl) g_swapWgl = (SwapFn)GetProcAddress(GetModuleHandleW(L"opengl32.dll"), "wglSwapBuffers");
+    static std::set<HMODULE> done;
+    HANDLE s = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
+    if (s == INVALID_HANDLE_VALUE) return; // modules are loading right now: try again next tick
+    MODULEENTRY32W e = { sizeof(e) };
+    for (BOOL ok = Module32FirstW(s, &e); ok; ok = Module32NextW(s, &e))
+        if (e.hModule != g_mod && done.insert(e.hModule).second) PatchIat(e.hModule);
+    CloseHandle(s);
+}
+
+static void HookDxgi();
+
 static DWORD WINAPI Init(LPVOID) {
     QueryPerformanceFrequency((LARGE_INTEGER*)&g_freq);
     GetModuleFileNameW(g_mod, g_ini, MAX_PATH);
@@ -122,8 +165,16 @@ static DWORD WINAPI Init(LPVOID) {
     LoadConfig(Now());
     HANDLE m = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(Stats), L"Local\\glide_stats");
     if (m) g_stats = (Stats*)MapViewOfFile(m, FILE_MAP_WRITE, 0, 0, sizeof(Stats));
+    bool dx = false;
+    for (;;) { // DX games: hook once dxgi.dll is there. OpenGL games (e.g. Minecraft Java): patch SwapBuffers imports as modules appear.
+        if (!dx && GetModuleHandleW(L"dxgi.dll")) { dx = true; HookDxgi(); }
+        if (GetModuleHandleW(L"opengl32.dll")) ScanGl();
+        Sleep(500);
+    }
+}
 
-    // Dummy swapchain only to read the vtable; all swapchains share dxgi.dll's vtable.
+// Dummy swapchain only to read the vtable; all swapchains share dxgi.dll's vtable.
+static void HookDxgi() {
     WNDCLASSW wc = { 0, DefWindowProcW, 0, 0, GetModuleHandleW(nullptr), 0, 0, 0, 0, L"glide_dummy" };
     RegisterClassW(&wc);
     HWND w = CreateWindowW(L"glide_dummy", L"", WS_OVERLAPPED, 0, 0, 8, 8, 0, 0, wc.hInstance, 0);
@@ -144,7 +195,6 @@ static DWORD WINAPI Init(LPVOID) {
         sc->Release(); dev->Release();
     }
     DestroyWindow(w); UnregisterClassW(L"glide_dummy", wc.hInstance);
-    return 0;
 }
 
 BOOL APIENTRY DllMain(HMODULE m, DWORD reason, LPVOID) {

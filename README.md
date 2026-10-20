@@ -4,7 +4,7 @@
 
 # Glide
 
-**A frame limiter with precise frame pacing for DX11 / DX12 games on Windows.**
+**A frame limiter with precise frame pacing for DX11, DX12 and OpenGL games on Windows.**
 
 Smooth, evenly spaced frames instead of stutter. Built for high-refresh-rate monitors.
 
@@ -26,7 +26,7 @@ A plain FPS cap only controls the *average*. If frames are delivered at uneven m
 ## Features
 
 - **Precise frame pacing.** Each deadline is the previous one plus the interval, so there is no cumulative drift. It waits on a high-resolution timer, then finishes with a short spin for sub-millisecond accuracy.
-- **DX11 and DX12.** Hooks the shared swap chain `Present` / `Present1`, so it works with both APIs.
+- **DX11, DX12 and OpenGL.** Hooks the shared swap chain `Present` / `Present1` for DirectX, and `SwapBuffers` for OpenGL games such as Minecraft Java Edition (`javaw.exe`).
 - **Process picker.** Pick the game from a clean dropdown of running windowed processes. Launchers, browsers and system tools are filtered out.
 - **Auto-inject.** Turn it on once per game and Glide attaches itself the next time the game starts (while the Glide window is open).
 - **Per-game profiles.** Every game keeps its own FPS limit and settings in `glide.ini`.
