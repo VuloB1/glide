@@ -70,7 +70,7 @@ static bool Blocked(const wchar_t* name) {
     return GetPrivateProfileIntW(L"block", name, 0, g_ini) != 0;
 }
 
-struct Mods { bool dxgi, gl, vk, glide, ac; }; // gl: OpenGL (e.g. Minecraft Java), vk: Vulkan
+struct Mods { bool dxgi, gl, vk, glide, ac; DWORD glideSize; }; // gl: OpenGL (e.g. Minecraft Java), vk: Vulkan
 static Mods ScanModules(DWORD pid) {
     Mods r = {};
     HANDLE s = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
@@ -81,11 +81,24 @@ static Mods ScanModules(DWORD pid) {
         if (!wcscmp(m, L"dxgi.dll")) r.dxgi = true;
         if (!wcscmp(m, L"opengl32.dll")) r.gl = true;
         if (!wcscmp(m, L"vulkan-1.dll")) r.vk = true;
-        if (!wcscmp(m, L"glide.dll")) r.glide = true;
+        if (!wcscmp(m, L"glide.dll")) { r.glide = true; r.glideSize = e.modBaseSize; }
         for (auto k : kAcMods) if (wcsstr(m, k)) r.ac = true;
     }
     CloseHandle(s);
     return r;
+}
+
+// Image size of the installed glide.dll: a game injected before an update keeps the old DLL loaded, and the sizes differ.
+static DWORD DllImageSize() {
+    wchar_t p[MAX_PATH]; swprintf_s(p, L"%s\\glide.dll", g_dir);
+    HANDLE f = CreateFileW(p, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return 0;
+    BYTE b[1024]; DWORD n = 0, sz = 0;
+    if (ReadFile(f, b, sizeof(b), &n, nullptr) && n > sizeof(IMAGE_DOS_HEADER)) {
+        LONG nt = ((IMAGE_DOS_HEADER*)b)->e_lfanew;
+        if (nt > 0 && (DWORD)nt + sizeof(IMAGE_NT_HEADERS) <= n) sz = ((IMAGE_NT_HEADERS*)(b + nt))->OptionalHeader.SizeOfImage;
+    }
+    CloseHandle(f); return sz;
 }
 
 static std::vector<std::pair<DWORD, std::wstring>> Procs() {
@@ -148,7 +161,8 @@ static void Inject() {
     DWORD pid = 0;
     for (auto& p : Procs()) if (!_wcsicmp(p.second.c_str(), name)) { pid = p.first; break; }
     if (!pid) { MessageBoxW(g_wnd, T(S_MB_NOTFOUND), L"Glide", MB_ICONWARNING); return; }
-    if (ScanModules(pid).glide) { MessageBoxW(g_wnd, T(S_MB_ALREADY), L"Glide", MB_ICONINFORMATION); return; }
+    Mods md = ScanModules(pid);
+    if (md.glide) { MessageBoxW(g_wnd, T(md.glideSize == DllImageSize() ? S_MB_ALREADY : S_MB_STALE), L"Glide", MB_ICONINFORMATION); return; }
     switch (InjectPid(pid, name)) {
     case R_BLOCKED: MessageBoxW(g_wnd, T(S_MB_BLOCKED), L"Glide", MB_ICONSTOP); break;
     case R_NOOPEN:  MessageBoxW(g_wnd, T(S_MB_NOOPEN), L"Glide", MB_ICONERROR); break;
