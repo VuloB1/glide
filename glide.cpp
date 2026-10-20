@@ -1,4 +1,4 @@
-// Frame limiter DLL: hooks IDXGISwapChain::Present / Present1 (covers DX11 and DX12) and
+// Frame limiter DLL: hooks IDXGISwapChain::Present / Present1 (DX11, DX12), SwapBuffers (OpenGL) and vkQueuePresentKHR (Vulkan) and
 // waits for an exact deadline before each present. Config: glide.ini next to this DLL.
 #include <windows.h>
 #include <d3d11.h>
@@ -71,8 +71,17 @@ static void Calib(LONGLONG now, float ms) {
     g_stats->calState = 2;
 }
 
-static void Limit() {
+// One API owns the limiter at a time: DXVK-style stacks present through DXGI and Vulkan for the same frame and must not be limited twice.
+static int g_owner; static LONGLONG g_ownerSeen;
+static bool Claim(int api, LONGLONG now) {
+    if (g_owner == api) { g_ownerSeen = now; return true; }
+    if (g_owner && now - g_ownerSeen < g_freq) return false;
+    g_owner = api; g_ownerSeen = now; g_next = g_lastPresent = 0; return true;
+}
+
+static void Limit(int api) {
     LONGLONG now = Now();
+    if (!Claim(api, now)) return;
     if (now - g_lastCfg > g_freq) LoadConfig(now);
     if (g_calReq && !g_calib) {
         g_calib = true; g_calN = 0; g_calBeg = now + g_freq; g_calEnd = now + 11 * g_freq;
@@ -95,14 +104,14 @@ static void Limit() {
 
 static HRESULT STDMETHODCALLTYPE HkPresent(IDXGISwapChain* sc, UINT si, UINT fl) {
     if (t_in) return g_present(sc, si, fl);
-    t_in = true; Limit();
+    t_in = true; Limit(1);
     HRESULT hr = g_present(sc, si, fl);
     t_in = false; return hr;
 }
 
 static HRESULT STDMETHODCALLTYPE HkPresent1(IDXGISwapChain1* sc, UINT si, UINT fl, const DXGI_PRESENT_PARAMETERS* p) {
     if (t_in) return g_present1(sc, si, fl, p);
-    t_in = true; Limit();
+    t_in = true; Limit(1);
     HRESULT hr = g_present1(sc, si, fl, p);
     t_in = false; return hr;
 }
@@ -119,11 +128,11 @@ typedef BOOL(WINAPI* SwapFn)(HDC);
 static SwapFn g_swapGdi, g_swapWgl;
 static BOOL WINAPI HkSwapGdi(HDC dc) {
     if (t_in) return g_swapGdi(dc);
-    t_in = true; Limit(); BOOL r = g_swapGdi(dc); t_in = false; return r;
+    t_in = true; Limit(2); BOOL r = g_swapGdi(dc); t_in = false; return r;
 }
 static BOOL WINAPI HkSwapWgl(HDC dc) {
     if (t_in) return g_swapWgl(dc);
-    t_in = true; Limit(); BOOL r = g_swapWgl(dc); t_in = false; return r;
+    t_in = true; Limit(2); BOOL r = g_swapWgl(dc); t_in = false; return r;
 }
 
 static void PatchIat(HMODULE m) {
@@ -153,6 +162,80 @@ static void ScanGl() {
     CloseHandle(s);
 }
 
+// ---- Vulkan: vkQueuePresentKHR. The app has usually cached the driver's function pointer already, so the function body itself is
+// patched (5-byte jump written atomically into one aligned 8-byte block, to a stub near the target). To call the original we put the
+// bytes back for the duration of the call. Pointers hooked: the loader's export plus whatever vkGetDeviceProcAddr returns for a dummy device. ----
+typedef int(__stdcall* PresentVk)(void*, const void*);
+struct VkHook { volatile LONG64* blk; int off; void* fn; BYTE orig[5], jmp[5]; };
+static VkHook g_vk[4]; static int g_nvk;
+
+static void SetBytes(VkHook& h, const BYTE* src) {
+    for (;;) {
+        LONG64 cur = *h.blk, nw = cur; memcpy((BYTE*)&nw + h.off, src, 5);
+        if (InterlockedCompareExchange64(h.blk, nw, cur) == cur) break;
+    }
+}
+static int VkCall(int i, void* q, const void* info) {
+    VkHook& h = g_vk[i]; bool top = !t_in;
+    if (top) { t_in = true; Limit(3); }
+    SetBytes(h, h.orig); int r = ((PresentVk)h.fn)(q, info); SetBytes(h, h.jmp);
+    if (top) t_in = false;
+    return r;
+}
+template <int I> static int __stdcall VkThunk(void* q, const void* info) { return VkCall(I, q, info); }
+static void* const kVkThunk[4] = { (void*)VkThunk<0>, (void*)VkThunk<1>, (void*)VkThunk<2>, (void*)VkThunk<3> };
+
+static void InstallVk(void* fn) {
+    if (!fn || g_nvk >= 4) return;
+    for (int i = 0; i < g_nvk; i++) if (g_vk[i].fn == fn) return;
+    uintptr_t a = (uintptr_t)fn, b = a & ~(uintptr_t)7; int off = (int)(a - b);
+    if (off + 5 > 8) return; // the 5 bytes must sit inside one aligned qword to be swapped atomically
+    BYTE* stub = nullptr;
+    for (uintptr_t d = 0x10000; d < 0x70000000 && !stub; d += 0x10000) {
+        stub = (BYTE*)VirtualAlloc((void*)((a & ~(uintptr_t)0xFFFF) - d), 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        if (!stub) stub = (BYTE*)VirtualAlloc((void*)((a & ~(uintptr_t)0xFFFF) + d), 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    }
+    if (!stub) return;
+    void* hook = kVkThunk[g_nvk];
+    BYTE j[14] = { 0xFF, 0x25, 0, 0, 0, 0 }; memcpy(j + 6, &hook, 8); memcpy(stub, j, 14); // jmp qword ptr [rip+0]; .quad hook
+    LONG64 rel = (LONG64)stub - (LONG64)(a + 5);
+    if (rel != (LONG32)rel) return;
+    DWORD old; if (!VirtualProtect((void*)b, 8, PAGE_EXECUTE_READWRITE, &old)) return; // blocked by dynamic-code mitigation: skip
+    VkHook& h = g_vk[g_nvk]; h.blk = (volatile LONG64*)b; h.off = off; h.fn = fn;
+    memcpy(h.orig, fn, 5); h.jmp[0] = 0xE9; *(LONG32*)(h.jmp + 1) = (LONG32)rel;
+    g_nvk++; SetBytes(h, h.jmp);
+}
+
+// Minimal Vulkan declarations so the build does not need the SDK.
+struct VkAppInfo { int sType; const void* pNext; const char* app; unsigned appVer; const char* eng; unsigned engVer, api; };
+struct VkInstInfo { int sType; const void* pNext; unsigned flags; const VkAppInfo* app; unsigned nLayers; const char* const* layers; unsigned nExt; const char* const* ext; };
+struct VkQueueInfo { int sType; const void* pNext; unsigned flags, family, count; const float* prio; };
+struct VkDevInfo { int sType; const void* pNext; unsigned flags, nQueue; const VkQueueInfo* queues; unsigned nLayers; const char* const* layers; unsigned nExt; const char* const* ext; const void* features; };
+
+static void HookVulkan() {
+    HMODULE m = GetModuleHandleW(L"vulkan-1.dll");
+    auto fn = [&](const char* n) { return (void*)GetProcAddress(m, n); };
+    InstallVk(fn("vkQueuePresentKHR"));
+    auto create = (int(__stdcall*)(const VkInstInfo*, const void*, void**))fn("vkCreateInstance");
+    auto enumDev = (int(__stdcall*)(void*, unsigned*, void**))fn("vkEnumeratePhysicalDevices");
+    auto mkDev = (int(__stdcall*)(void*, const VkDevInfo*, const void*, void**))fn("vkCreateDevice");
+    auto getProc = (void*(__stdcall*)(void*, const char*))fn("vkGetDeviceProcAddr");
+    auto delDev = (void(__stdcall*)(void*, const void*))fn("vkDestroyDevice");
+    auto delInst = (void(__stdcall*)(void*, const void*))fn("vkDestroyInstance");
+    if (!create || !enumDev || !mkDev || !getProc || !delDev || !delInst) return;
+    VkAppInfo ai = { 0, nullptr, "glide", 1, nullptr, 0, 1 << 22 }; // Vulkan 1.0
+    VkInstInfo ii = { 1, nullptr, 0, &ai };
+    void* inst = nullptr; if (create(&ii, nullptr, &inst) != 0 || !inst) return;
+    void* devs[8]; unsigned n = 8;
+    if (enumDev(inst, &n, devs) >= 0) for (unsigned i = 0; i < n && i < 8; i++) {
+        float prio = 1; VkQueueInfo qi = { 2, nullptr, 0, 0, 1, &prio }; const char* ext[1] = { "VK_KHR_swapchain" };
+        VkDevInfo di = { 3, nullptr, 0, 1, &qi, 0, nullptr, 1, ext, nullptr };
+        void* dev = nullptr;
+        if (mkDev(devs[i], &di, nullptr, &dev) == 0 && dev) { InstallVk(getProc(dev, "vkQueuePresentKHR")); delDev(dev, nullptr); }
+    }
+    delInst(inst, nullptr);
+}
+
 static void HookDxgi();
 
 static DWORD WINAPI Init(LPVOID) {
@@ -165,9 +248,10 @@ static DWORD WINAPI Init(LPVOID) {
     LoadConfig(Now());
     HANDLE m = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(Stats), L"Local\\glide_stats");
     if (m) g_stats = (Stats*)MapViewOfFile(m, FILE_MAP_WRITE, 0, 0, sizeof(Stats));
-    bool dx = false;
+    bool dx = false, vk = false;
     for (;;) { // DX games: hook once dxgi.dll is there. OpenGL games (e.g. Minecraft Java): patch SwapBuffers imports as modules appear.
         if (!dx && GetModuleHandleW(L"dxgi.dll")) { dx = true; HookDxgi(); }
+        if (!vk && GetModuleHandleW(L"vulkan-1.dll")) { vk = true; HookVulkan(); }
         if (GetModuleHandleW(L"opengl32.dll")) ScanGl();
         Sleep(500);
     }
@@ -205,4 +289,5 @@ BOOL APIENTRY DllMain(HMODULE m, DWORD reason, LPVOID) {
     return TRUE;
 }
 // shortcut: no unload (DLL stays pinned, hooks never removed), upgrade if you need hot-eject.
+// shortcut: the Vulkan inline patch is not safe against another thread executing the first bytes of vkQueuePresentKHR at the exact moment of patching; use a real detour library if that ever shows up.
 // shortcut: one global deadline, so a process with several swapchains is limited as one stream.

@@ -70,7 +70,7 @@ static bool Blocked(const wchar_t* name) {
     return GetPrivateProfileIntW(L"block", name, 0, g_ini) != 0;
 }
 
-struct Mods { bool dxgi, gl, glide, ac; }; // gl: OpenGL (e.g. Minecraft Java)
+struct Mods { bool dxgi, gl, vk, glide, ac; }; // gl: OpenGL (e.g. Minecraft Java), vk: Vulkan
 static Mods ScanModules(DWORD pid) {
     Mods r = {};
     HANDLE s = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
@@ -80,6 +80,7 @@ static Mods ScanModules(DWORD pid) {
         wchar_t m[MAX_MODULE_NAME32 + 1]; wcscpy_s(m, e.szModule); _wcslwr_s(m);
         if (!wcscmp(m, L"dxgi.dll")) r.dxgi = true;
         if (!wcscmp(m, L"opengl32.dll")) r.gl = true;
+        if (!wcscmp(m, L"vulkan-1.dll")) r.vk = true;
         if (!wcscmp(m, L"glide.dll")) r.glide = true;
         for (auto k : kAcMods) if (wcsstr(m, k)) r.ac = true;
     }
@@ -394,7 +395,7 @@ static void PickProc() {
     for (auto& p : Procs()) {
         if (p.first == GetCurrentProcessId() || !wins.count(p.first) || seen.count(p.second) || IsNoise(p.first, p.second.c_str())) continue;
         Mods md = ScanModules(p.first);
-        if (!md.dxgi && !md.gl) continue;
+        if (!md.dxgi && !md.gl && !md.vk) continue;
         seen.insert(p.second); v.push_back({ p.second, wins[p.first], Blocked(p.second.c_str()) || md.ac, !_wcsicmp(p.second.c_str(), cur) });
     }
     std::sort(v.begin(), v.end(), [](const PItem& a, const PItem& b) { return a.blocked != b.blocked ? !a.blocked : _wcsicmp(a.name.c_str(), b.name.c_str()) < 0; });
