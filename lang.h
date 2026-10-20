@@ -8,7 +8,7 @@ enum Str {
     S_MB_NOTFOUND, S_MB_ALREADY, S_MB_BLOCKED, S_MB_NOOPEN, S_MB_FAILED, S_AUTO_OK, S_AUTO_BLK, S_AUTO_FAIL,
     S_LANGUAGE, S_STARTUP, S_BG, S_TRAY_OPEN, S_TRAY_EXIT,
     S_UPDATES, S_ABOUT, S_VERSION, S_UP_CHECK, S_UP_CHECKING, S_UP_LATEST, S_UP_AVAIL, S_UP_NOW, S_UP_DL, S_UP_INST, S_UP_ERR, S_UP_ERR2, S_AUTOUP,
-    S_ABOUT_DESC, S_CREATED, S_LICENSE, S_ISSUES, S_UP_BANNER, S_MB_STALE, S_COUNT
+    S_ABOUT_DESC, S_CREATED, S_LICENSE, S_ISSUES, S_UP_BANNER, S_COUNT
 };
 enum { NLANG = 6 };
 static const wchar_t* const kLangName[NLANG] = { L"English", L"Español", L"Português", L"日本語", L"中文", L"한국어" };
@@ -83,5 +83,4 @@ static const wchar_t* const kStr[S_COUNT][NLANG] = {
 /* LICENSE */ { L"Free and open source · MIT License", L"Libre y de código abierto · Licencia MIT", L"Livre e de código aberto · Licença MIT", L"無料・オープンソース · MIT ライセンス", L"免费开源 · MIT 许可证", L"무료 오픈 소스 · MIT 라이선스" },
 /* ISSUES */ { L"Report an issue", L"Reportar un problema", L"Relatar um problema", L"問題を報告", L"报告问题", L"문제 신고" },
 /* UP_BANNER */ { L"Update %s available · open Settings", L"Actualización %s disponible · abre Ajustes", L"Atualização %s disponível · abra Configurações", L"アップデート %s あり · 設定を開く", L"有新版本 %s · 请打开设置", L"업데이트 %s 사용 가능 · 설정 열기" },
-/* MB_STALE */ { L"This game was injected with an older Glide version. Restart the game so it loads the new one.", L"Este juego se inyectó con una versión anterior de Glide. Reinícialo para que cargue la nueva.", L"Este jogo foi injetado com uma versão anterior do Glide. Reinicie o jogo para carregar a nova.", L"このゲームは古いバージョンの Glide でインジェクトされています。新しいバージョンを読み込むにはゲームを再起動してください。", L"该游戏注入的是旧版 Glide。请重启游戏以加载新版本。", L"이 게임은 이전 버전의 Glide로 주입되었습니다. 새 버전을 적용하려면 게임을 다시 시작하세요." },
 };
