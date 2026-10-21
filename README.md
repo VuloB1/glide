@@ -11,7 +11,8 @@ Smooth, evenly spaced frames instead of stutter. Built for high-refresh-rate mon
 [![Download](https://img.shields.io/github/v/release/VuloB1/glide?label=download&color=5b8cff)](https://github.com/VuloB1/glide/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-4fd1c5)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-5b8cff)
-![DirectX](https://img.shields.io/badge/DirectX-11%20%7C%2012-4fd1c5)
+![APIs](https://img.shields.io/badge/DX11%20%7C%20DX12%20%7C%20OpenGL%20%7C%20Vulkan-4fd1c5)
+![Languages](https://img.shields.io/badge/languages-6-5b8cff)
 
 <img src="docs/screenshot.png" width="460" alt="Glide main window limiting a game to 144 FPS">
 
@@ -21,12 +22,12 @@ Smooth, evenly spaced frames instead of stutter. Built for high-refresh-rate mon
 
 ## Why Glide?
 
-A plain FPS cap only controls the *average*. If frames are delivered at uneven moments, the game still feels choppy. Glide hooks `IDXGISwapChain::Present` and releases every frame on an exact deadline, so the time between frames stays flat. In testing, the frame-time deviation sits around **0.01 ms** (see the live graph above).
+A plain FPS cap only controls the *average*. If frames are delivered at uneven moments, the game still feels choppy. Glide hooks the present call of the graphics API the game uses (DXGI `Present`, OpenGL `SwapBuffers` or Vulkan `vkQueuePresentKHR`) and releases every frame on an exact deadline, so the time between frames stays flat. In testing, the frame-time deviation sits around **0.01 ms** (see the live graph above).
 
 ## Features
 
-- **Precise frame pacing.** Each deadline is the previous one plus the interval, so there is no cumulative drift. It waits on a high-resolution timer, then finishes with a short spin for sub-millisecond accuracy.
-- **DX11, DX12, OpenGL and Vulkan.** Hooks the shared swap chain `Present` / `Present1` for DirectX, `SwapBuffers` for OpenGL games such as Minecraft Java Edition (`javaw.exe`), and `vkQueuePresentKHR` for Vulkan. If a stack presents through two APIs for the same frame (DXVK), only one of them is limited.
+- **Precise frame pacing.** Each deadline is the previous one plus the interval, so there is no cumulative drift. It waits on a high-resolution timer, then finishes with a short spin for sub-millisecond accuracy. The spin margin adapts to your system's timer jitter.
+- **DX11, DX12, OpenGL and Vulkan.** Hooks the shared swap chain `Present` / `Present1` for DirectX, `SwapBuffers` for OpenGL games such as Minecraft Java Edition (`javaw.exe`), and `vkQueuePresentKHR` for Vulkan (inline patch, no Vulkan SDK needed). If a stack presents through two APIs for the same frame (DXVK), only one of them is limited.
 - **Process picker.** Pick the game from a clean dropdown of running windowed processes. Launchers, browsers and system tools are filtered out.
 - **Auto-inject.** Turn it on once per game and Glide attaches itself the next time the game starts (while the Glide window is open).
 - **Per-game profiles.** Every game keeps its own FPS limit and settings in `glide.ini`.
@@ -34,7 +35,7 @@ A plain FPS cap only controls the *average*. If frames are delivered at uneven m
 - **Live performance graph.** FPS, average, deviation and max frame time, streamed straight from the game.
 - **Six languages.** English, Español, Português, 日本語, 中文 and 한국어. Defaults to your Windows language and can be changed in the app.
 - **Start with Windows and run in the background.** Optional autostart, and closing the window can keep Glide in the system tray so auto-inject keeps working.
-- **Updates from GitHub.** Glide checks the latest release (once a day, can be turned off) and updates in one click. The installer is only run if its SHA-256 matches the digest GitHub publishes for the release.
+- **Updates from GitHub.** Glide checks the latest release (once a day, can be turned off) and updates in one click. The installer is only run if its SHA-256 matches the digest GitHub publishes for the release, and the downloaded installer is deleted from `%TEMP%` afterwards.
 - **Settings and About.** A gear button opens the settings page: language, autostart, background mode, updates, and info about the program and its creator.
 - **Light on resources.** The spin-wait before each frame adapts to your machine's timer jitter (about half the CPU of a fixed margin at 177 FPS with the same precision), and the window repaints only what changed: ~2% of a core with the live graph, ~0% and ~3 MB when minimized or in the tray.
 - **Installer included.** Per-user install, no admin rights needed, Start Menu and optional Desktop shortcuts, clean uninstall.
@@ -66,18 +67,24 @@ This applies to both manual and automatic injection.
 
 > The installer is not code-signed, so Windows SmartScreen or your antivirus may warn about it. The full source is here and you can build it yourself.
 
+> [!NOTE]
+> A DLL injected into a running game stays loaded. After updating Glide, restart the game so it picks up the new version.
+
 ## How it works
 
 ```
 glide-ui.exe  ──inject──▶  game.exe
-                              └─ glide.dll hooks IDXGISwapChain::Present
+                              └─ glide.dll hooks Present / SwapBuffers / vkQueuePresentKHR
                                     ├─ waits for the next deadline (timer + spin)
                                     ├─ reads limit/profile from glide.ini (every second)
                                     └─ writes frame times to shared memory ──▶ live graph
 ```
 
 - The UI injects `glide.dll` with `CreateRemoteThread` + `LoadLibraryW`.
-- The DLL patches the swap chain vtable (`Present` and `Present1`) with `VirtualProtect`.
+- DirectX: the DLL patches the swap chain vtable (`Present` and `Present1`).
+- OpenGL: the import tables of loaded modules are patched for `SwapBuffers` / `wglSwapBuffers` and rescanned as the game loads libraries (needed for Java/LWJGL).
+- Vulkan: `vkQueuePresentKHR` is patched inline with an atomic 5-byte jump to a nearby stub.
+- Only one API owns the limiter at a time, so layered stacks (DXVK, Zink) are not limited twice.
 - Configuration lives in `glide.ini` next to the DLL; per-game sections are named after the exe.
 
 ## Building from source
@@ -93,8 +100,10 @@ This produces `glide.dll`, `glide-ui.exe` and `glide-setup.exe` (the installer e
 | File | Purpose |
 | --- | --- |
 | `glide.cpp` | Hook DLL: limiter, calibration, stats |
-| `ui.cpp` | Main window, process picker, blocklist, injector |
+| `ui.cpp` | Main window, settings, tray, updater, process picker, blocklist, injector |
 | `setup.cpp` | Installer / uninstaller |
+| `lang.h` | Translations (en, es, pt, ja, zh, ko) |
+| `version.h` | Single source of the version number |
 | `logo.h`, `mkicon.cpp` | Logo drawing and icon generation |
 | `test.cpp` | Small D3D11 test app for measuring frame times |
 
@@ -102,6 +111,8 @@ This produces `glide.dll`, `glide-ui.exe` and `glide-setup.exe` (the installer e
 
 - Windows 10 / 11, 64-bit games only.
 - Exclusive fullscreen is not tested; borderless and windowed are recommended.
+- Tested with D3D11, OpenGL (Minecraft Java Edition) and the Vulkan SDK's `vkcube`. Vulkan in real games has had less testing, so please report issues.
+- Stats are shared through one memory block, so the live graph follows one game at a time.
 
 ## License
 
