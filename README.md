@@ -86,6 +86,7 @@ glide-ui.exe  ──inject──▶  game.exe
 - OpenGL: the import tables of loaded modules are patched for `SwapBuffers` / `wglSwapBuffers` and rescanned as the game loads libraries (needed for Java/LWJGL).
 - Vulkan: `vkQueuePresentKHR` is patched inline with an atomic 5-byte jump to a nearby stub.
 - Only one API owns the limiter at a time, so layered stacks (DXVK, Zink) are not limited twice.
+- Low-latency mode calls `IDXGIDevice1::SetMaximumFrameLatency(1)` on DX11 swap chains (re-applied every second). It does nothing on DX12, OpenGL and Vulkan, and is skipped when a frame generation module (DLSS-FG, FSR3-FG) is loaded.
 - Configuration lives in `glide.ini` next to the DLL; per-game sections are named after the exe.
 
 ## Building from source
@@ -113,6 +114,7 @@ This produces `glide.dll`, `glide-ui.exe` and `glide-setup.exe` (the installer e
 - Windows 10 / 11, 64-bit games only.
 - Exclusive fullscreen is not tested; borderless and windowed are recommended.
 - Tested with D3D11, OpenGL (Minecraft Java Edition) and the Vulkan SDK's `vkcube`. Vulkan in real games has had less testing, so please report issues.
+- With frame generation the limit applies to the frames the game presents, not to the generated ones, so the on-screen rate can be higher than the limit. Frame generation has not been tested.
 - Stats are shared through one memory block, so the live graph follows one game at a time.
 
 ## License
