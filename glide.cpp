@@ -20,6 +20,17 @@ static Present1Fn g_present1;
 
 static LONGLONG Now() { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart; }
 
+// Low-latency mode (ini "latency", default on): shrinks the DX11 render queue from 3 frames to 1, so the picture shown is closer to the
+// input that made it. Skipped while frame generation is loaded (g_fg): its pacing depends on frames being queued ahead.
+static bool g_lowLat, g_fg;
+static IDXGISwapChain* g_scDone;
+static void QueueDepth(IDXGISwapChain* sc) {
+    if (!g_lowLat || g_fg || sc == g_scDone) return;
+    g_scDone = sc;
+    IDXGIDevice1* d = nullptr; // fails harmlessly on DX12, which has no IDXGIDevice1
+    if (SUCCEEDED(sc->GetDevice(IID_PPV_ARGS(&d)))) { d->SetMaximumFrameLatency(1); d->Release(); }
+}
+
 static void LoadConfig(LONGLONG now) {
     g_lastCfg = now;
     // per-game profile: section named after the exe, falling back to [glide] fps
@@ -27,6 +38,8 @@ static void LoadConfig(LONGLONG now) {
     LONGLONG iv = fps ? g_freq / fps : 0;
     if (iv != g_interval) { g_interval = iv; g_next = 0; }
     g_calReq = GetPrivateProfileIntW(g_exe, L"calibrate", 0, g_ini) != 0;
+    g_lowLat = GetPrivateProfileIntW(g_exe, L"latency", GetPrivateProfileIntW(L"glide", L"latency", 1, g_ini), g_ini) != 0;
+    g_scDone = nullptr; // re-apply now and then: games and device resets can change it back
 }
 
 // Sleep on a high-resolution timer until `g_margin` before the deadline, then spin. The margin follows how late the timer really wakes
@@ -113,14 +126,14 @@ static void Limit(int api) {
 
 static HRESULT STDMETHODCALLTYPE HkPresent(IDXGISwapChain* sc, UINT si, UINT fl) {
     if (t_in) return g_present(sc, si, fl);
-    t_in = true; Limit(1);
+    t_in = true; Limit(1); QueueDepth(sc);
     HRESULT hr = g_present(sc, si, fl);
     t_in = false; return hr;
 }
 
 static HRESULT STDMETHODCALLTYPE HkPresent1(IDXGISwapChain1* sc, UINT si, UINT fl, const DXGI_PRESENT_PARAMETERS* p) {
     if (t_in) return g_present1(sc, si, fl, p);
-    t_in = true; Limit(1);
+    t_in = true; Limit(1); QueueDepth(sc);
     HRESULT hr = g_present1(sc, si, fl, p);
     t_in = false; return hr;
 }
@@ -262,6 +275,8 @@ static DWORD WINAPI Init(LPVOID) {
         if (!dx && GetModuleHandleW(L"dxgi.dll")) { dx = true; HookDxgi(); }
         if (!vk && GetModuleHandleW(L"vulkan-1.dll")) { vk = true; HookVulkan(); }
         if (GetModuleHandleW(L"opengl32.dll")) ScanGl();
+        for (auto n : { L"nvngx_dlssg.dll", L"sl.dlss_g.dll", L"dlssg_to_fsr3_amd_is_better.dll", L"amd_fidelityfx_framegeneration_dx12.dll", L"ffx_frameinterpolation_x64.dll" })
+            if (GetModuleHandleW(n)) g_fg = true;
         Sleep(++ticks < 40 ? 500 : 3000); // modules load mostly at startup: poll fast for 20 s, then rarely
     }
 }

@@ -2,6 +2,6 @@
 #ifndef GLIDE_MAJ
 #define GLIDE_MAJ 1
 #define GLIDE_MIN 2
-#define GLIDE_PAT 3
-#define GLIDE_VER_W L"1.2.3"
+#define GLIDE_PAT 4
+#define GLIDE_VER_W L"1.2.4"
 #endif

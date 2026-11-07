@@ -28,6 +28,7 @@ A plain FPS cap only controls the *average*. If frames are delivered at uneven m
 
 - **Precise frame pacing.** Each deadline is the previous one plus the interval, so there is no cumulative drift. It waits on a high-resolution timer, then finishes with a short spin for sub-millisecond accuracy. The spin margin adapts to your system's timer jitter.
 - **DX11, DX12, OpenGL and Vulkan.** Hooks the shared swap chain `Present` / `Present1` for DirectX, `SwapBuffers` for OpenGL games such as Minecraft Java Edition (`javaw.exe`), and `vkQueuePresentKHR` for Vulkan (inline patch, no Vulkan SDK needed). If a stack presents through two APIs for the same frame (DXVK), only one of them is limited.
+- **Low-latency mode.** On DX11 games Glide shrinks the render queue from 3 frames to 1, so what you see follows your input more closely. On by default; set `latency=0` in `glide.ini` to turn it off. It is skipped when DLSS/FSR frame generation is detected.
 - **Process picker.** Pick the game from a clean dropdown of running windowed processes. Launchers, browsers and system tools are filtered out.
 - **Auto-inject.** Turn it on once per game and Glide attaches itself the next time the game starts (while the Glide window is open).
 - **Per-game profiles.** Every game keeps its own FPS limit and settings in `glide.ini`.
