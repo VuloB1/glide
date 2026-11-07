@@ -25,11 +25,11 @@ using std::min; using std::max;
 struct Stats { volatile LONG head; float ms[240]; volatile LONG calState, suggest, capable, calLeft; }; // must match glide.cpp
 
 #include "lang.h"
-enum { ID_PROC = 1, ID_FPS, ID_APPLY, ID_INJECT, ID_AUTO, ID_TIMER, ID_PICK, ID_CALIB, ID_USE, ID_PRE = 10, ID_LANG = 20, ID_STARTUP, ID_BG, ID_GEAR, ID_UPCHK, ID_AUTOUP, ID_GITHUB, ID_ISSUES };
+enum { ID_PROC = 1, ID_FPS, ID_APPLY, ID_INJECT, ID_AUTO, ID_TIMER, ID_PICK, ID_CALIB, ID_USE, ID_PRE = 10, ID_LANG = 20, ID_STARTUP, ID_BG, ID_GEAR, ID_UPCHK, ID_AUTOUP, ID_AUTOINST, ID_GITHUB, ID_ISSUES };
 static HWND hProc, hFps, g_wnd;
 static bool g_auto, g_startup, g_bg, g_quit; // g_bg: closing the window hides it to the tray instead of exiting
 static int g_lang, g_page; // g_page: 0 main, 1 settings
-static bool g_autoUp = true;
+static bool g_autoUp = true, g_autoInst = true; // g_autoInst: install a verified update as soon as the check finds it
 enum { U_IDLE, U_CHECKING, U_LATEST, U_AVAIL, U_ERR, U_DL, U_INST, U_ERR2 };
 static volatile LONG g_up; // update state; worker threads fill the strings below, then publish the state
 static std::wstring g_upTag, g_upUrl; static std::string g_upSha;
@@ -214,7 +214,7 @@ static int CurFps() { wchar_t t[16]; GetWindowTextW(hFps, t, 16); return _wtoi(t
 // Buttons are painted and hit-tested by the main window (native child buttons leave a stray 1px edge).
 struct Btn { int id; float x, y, w, h; int str; const wchar_t* lit; int page; }; // label = lit if set, else the translated string `str`
 static const wchar_t* Label(const Btn& b) { return b.id == ID_UPCHK ? T(g_up == U_AVAIL ? S_UP_NOW : g_up == U_CHECKING ? S_UP_CHECKING : g_up == U_DL ? S_UP_DL : g_up == U_INST ? S_UP_INST : S_UP_CHECK) : b.lit ? b.lit : T(b.str); }
-static bool On(int id) { return id == ID_AUTO ? g_auto : id == ID_STARTUP ? g_startup : id == ID_AUTOUP ? g_autoUp : g_bg; }
+static bool On(int id) { return id == ID_AUTO ? g_auto : id == ID_STARTUP ? g_startup : id == ID_AUTOUP ? g_autoUp : id == ID_AUTOINST ? g_autoInst : g_bg; }
 static bool Vis(const Btn& b) { return b.page < 0 || b.page == g_page; }
 static std::vector<Btn> g_btns;
 static int g_hot, g_down;
@@ -249,7 +249,7 @@ static void DrawBtn(Graphics& g, const Btn& b) {
             SolidBrush gb(ic); g.FillPath(&gb, &gp);
             if (g_up == U_AVAIL) { SolidBrush dot(cAccent); g.FillEllipse(&dot, w - 12, 4.f, 8.f, 8.f); }
         }
-    } else if (id == ID_AUTO || id == ID_STARTUP || id == ID_BG || id == ID_AUTOUP) { // toggle switch + label
+    } else if (id == ID_AUTO || id == ID_STARTUP || id == ID_BG || id == ID_AUTOUP || id == ID_AUTOINST) { // toggle switch + label
         bool on = On(id);
         Round(g, on ? Mix(cAccent, shade) : Mix(Color(66, 71, 84), shade), 0, (h - 20) / 2, 38, 20, 10);
         SolidBrush k(Color(255, 255, 255)); g.FillEllipse(&k, on ? 20.f : 2.f, (h - 16) / 2, 16.f, 16.f);
@@ -564,11 +564,16 @@ static void UpdateClick() {
     } else if (g_up == U_IDLE || g_up == U_LATEST || g_up == U_ERR || g_up == U_ERR2) StartCheck();
 }
 
+static void AutoInstall() {
+    if (g_autoInst && g_up == U_AVAIL && !g_upSha.empty()) UpdateClick();
+}
+
 static void Command(int id) {
     if (id == ID_PICK) PickProc();
     else if (id == ID_GEAR) { g_page ^= 1; g_hot = 0; ShowWindow(hFps, g_page ? SW_HIDE : SW_SHOW); InvalidateRect(g_wnd, nullptr, FALSE); }
     else if (id == ID_UPCHK) { UpdateClick(); InvalidateRect(g_wnd, nullptr, FALSE); }
     else if (id == ID_AUTOUP) { g_autoUp = !g_autoUp; WritePrivateProfileStringW(L"glide", L"autoupdate", g_autoUp ? L"1" : L"0", g_ini); InvBtn(id); }
+    else if (id == ID_AUTOINST) { g_autoInst = !g_autoInst; WritePrivateProfileStringW(L"glide", L"autoinstall", g_autoInst ? L"1" : L"0", g_ini); InvBtn(id); if (g_autoInst) AutoInstall(); }
     else if (id == ID_GITHUB) ShellExecuteW(nullptr, L"open", L"https://github.com/VuloB1/glide", nullptr, nullptr, SW_SHOWNORMAL);
     else if (id == ID_ISSUES) ShellExecuteW(nullptr, L"open", L"https://github.com/VuloB1/glide/issues", nullptr, nullptr, SW_SHOWNORMAL);
     else if (id == ID_LANG) {
@@ -800,7 +805,7 @@ static LRESULT CALLBACK Proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_SHOWME: ShowMain(); return 0;
-    case WM_UPDATE: InvalidateRect(w, nullptr, FALSE); return 0;
+    case WM_UPDATE: AutoInstall(); InvalidateRect(w, nullptr, FALSE); return 0;
     case WM_DESTROY: Tray(NIM_DELETE); PostQuitMessage(0); return 0;
     default:
         if (msg == g_tbCreated && g_bg) Tray(NIM_ADD); // explorer restarted
@@ -829,6 +834,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
     g_bg = GetPrivateProfileIntW(L"glide", L"background", 0, g_ini) != 0;
     g_startup = StartupGet();
     g_autoUp = GetPrivateProfileIntW(L"glide", L"autoupdate", 1, g_ini) != 0;
+    g_autoInst = GetPrivateProfileIntW(L"glide", L"autoinstall", 1, g_ini) != 0;
     g_nextCheck = GetTickCount64() + 4000;
     g_nextClean = GetTickCount64() + 8000; // the updater leaves its downloaded installer in %TEMP%; remove it once the installer has exited
     fTitle = new Font(L"Segoe UI", 26, FontStyleBold, UnitPixel); fBig = new Font(L"Segoe UI", 24, FontStyleBold, UnitPixel);
@@ -861,7 +867,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
                { ID_APPLY, 120, 268, 80, 38, S_APPLY, nullptr, 0 }, { ID_CALIB, 40, 320, 150, 36, S_CALIB, nullptr, 0 }, { ID_USE, 428, 320, 92, 36, S_USE, nullptr, 0 },
                { ID_GEAR, 496, 20, 40, 36, 0, L"", -1 },
                { ID_LANG, 170, 122, 200, 32, 0, L"", 1 }, { ID_STARTUP, 40, 170, 330, 26, S_STARTUP, nullptr, 1 }, { ID_BG, 40, 204, 330, 26, S_BG, nullptr, 1 },
-               { ID_UPCHK, 372, 288, 148, 36, S_UP_CHECK, nullptr, 1 }, { ID_AUTOUP, 40, 350, 330, 26, S_AUTOUP, nullptr, 1 },
+               { ID_UPCHK, 372, 288, 148, 36, S_UP_CHECK, nullptr, 1 }, { ID_AUTOUP, 40, 340, 330, 26, S_AUTOUP, nullptr, 1 }, { ID_AUTOINST, 40, 366, 330, 26, S_AUTOINST, nullptr, 1 },
                { ID_GITHUB, 40, 532, 120, 32, 0, L"GitHub", 1 }, { ID_ISSUES, 168, 532, 190, 32, S_ISSUES, nullptr, 1 } };
 
     hFps = mk(L"EDIT", L"", ES_NUMBER | ES_CENTER | ES_AUTOHSCROLL, 50, 277, 50, 20, ID_FPS);
